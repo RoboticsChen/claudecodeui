@@ -470,6 +470,20 @@ const addProviderModelEffortColumns = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'provider_models', columnNames, 'effort_default', 'TEXT DEFAULT NULL');
 };
 
+/**
+ * Adds the `provider_title` column holding the last title the provider CLI
+ * recorded for each session (Claude's `/rename`).
+ *
+ * Nothing is backfilled: the title lives in the transcript, which the indexer
+ * reads the next time that transcript changes. Until then the column stays
+ * NULL, which tells the indexer that a title it finds may predate a rename
+ * made in the app.
+ */
+const addSessionProviderTitleColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'provider_title', 'TEXT');
+};
+
 const ensureProjectsForSessionPaths = (db: Database): void => {
   if (!tableExists(db, 'sessions')) {
     return;
@@ -533,6 +547,7 @@ export const runMigrations = (db: Database) => {
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
     addForkedFromSessionIdColumn(db);
+    addSessionProviderTitleColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 
