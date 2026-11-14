@@ -1781,3 +1781,30 @@ export type CliApplication = {
 export type SandboxCommandService = {
   execute(argumentsList: string[]): Promise<number>;
 };
+
+// ---------------------------
+//----------------- EXTERNAL SESSIONS MODULE CONTRACTS ------------
+
+/**
+ * One live interactive Claude CLI process, as recorded in the CLI's own
+ * process registry (`~/.claude/sessions/<pid>.json`).
+ *
+ * Produced by the providers module's CLI liveness service and consumed by the
+ * external-sessions module, which attaches the web chat to the terminal that
+ * runs this process. Only processes that are verifiably still alive are ever
+ * reported: a registry file outlives a crash, so its presence alone is not
+ * evidence.
+ *
+ * - `providerSessionId` is Claude's own session id. It changes when the user
+ *   runs `/clear` in that terminal; callers re-read the registry instead of
+ *   caching the mapping.
+ * - `status` is the CLI's own turn state: `busy` while a turn runs, `idle`
+ *   while it waits for input. Any other value is reported as `idle`.
+ */
+export type LiveClaudeCliProcess = {
+  pid: number;
+  providerSessionId: string;
+  cwd: string | null;
+  status: 'busy' | 'idle';
+  startedAt: number;
+};

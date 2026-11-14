@@ -16,7 +16,14 @@ import {
     providerRuntimeService,
     reapOrphanedOpenCodeServers,
 } from '@/modules/providers/index.js';
-import { chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
+import {
+    broadcastSessionUpserted,
+    broadcastToConnectedClients,
+    chatRunRegistry,
+    connectedClients,
+    createWebSocketServer,
+} from '@/modules/websocket/index.js';
+import { startExternalSessionMonitor, stopExternalSessionMonitor } from '@/modules/external-sessions/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -382,6 +389,15 @@ async function startServer() {
 
             // Start watching the projects folder for changes
             await initializeSessionsWatcher();
+            // Attaches the web chat to Claude sessions running in tmux
+            // terminals, so a message sent here is typed into that terminal
+            // instead of forking the conversation into a second process.
+            startExternalSessionMonitor({
+                runRegistry: chatRunRegistry,
+                connections: connectedClients,
+                broadcast: broadcastToConnectedClients,
+                announceSession: broadcastSessionUpserted,
+            });
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService);
@@ -396,6 +412,7 @@ async function startServer() {
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            stopExternalSessionMonitor();
             try {
                 await browserUseService.stopAllSessions();
             } catch (err) {

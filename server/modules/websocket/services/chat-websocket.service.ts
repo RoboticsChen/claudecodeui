@@ -5,6 +5,11 @@ import type { WebSocket } from 'ws';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import {
+  interruptExternalSession,
+  isExternalSession,
+  sendToExternalSession,
+} from '@/modules/external-sessions/index.js';
+import {
   MAX_CONCURRENT_SIDE_QUESTIONS_PER_SESSION,
   providerCapabilitiesService,
   providerModelsService,
@@ -233,6 +238,50 @@ function readVerifiedAttachments(clientOptions: AnyRecord): ChatAttachmentDescri
 }
 
 /**
+ * The text typed into a terminal session for one web message.
+ *
+ * The terminal cannot receive files the way the SDK prompt does, so each
+ * attachment (already narrowed to the upload store) is named by its absolute
+ * path on a line of its own; Claude reads the files it needs from there.
+ */
+function composeExternalSessionText(content: string, attachments: ChatAttachmentDescriptor[]): string {
+  if (attachments.length === 0) {
+    return content;
+  }
+  const lines = attachments.map((descriptor) => `- ${descriptor.path}`);
+  return `${content}\n\nAttached files:\n${lines.join('\n')}`;
+}
+
+/**
+ * Sends one turn of a terminal session by typing it into the terminal.
+ *
+ * An edit of an earlier message rewinds the conversation, which only the SDK
+ * resume path can do; it is refused rather than typed in as a new message.
+ */
+async function dispatchToExternalSession(
+  ws: WebSocket | null,
+  sessionId: string,
+  data: AnyRecord,
+  rewritesHistory: boolean,
+): Promise<{ started: boolean; error: string | null }> {
+  if (rewritesHistory) {
+    const error = 'Editing an earlier message is not available while the session runs in a terminal.';
+    if (ws) {
+      sendProtocolError(ws, 'EXTERNAL_SESSION_UNSUPPORTED', error, sessionId);
+    }
+    return { started: false, error };
+  }
+
+  const content = typeof data.content === 'string' ? data.content : '';
+  const attachments = readVerifiedAttachments((data.options ?? {}) as AnyRecord);
+  const error = await sendToExternalSession(sessionId, composeExternalSessionText(content, attachments));
+  if (error && ws) {
+    sendProtocolError(ws, 'EXTERNAL_SEND_FAILED', error, sessionId);
+  }
+  return { started: !error, error };
+}
+
+/**
  * Registers the run and hands the turn to the provider runtime.
  *
  * `extraRuntimeOptions` is how an edited message asks the provider to resume
@@ -249,6 +298,14 @@ async function dispatchRun(
   beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
 ): Promise<{ started: boolean; error: string | null }> {
   const provider = session.provider as LLMProvider;
+
+  // A session that is live in a tmux terminal is driven by typing into that
+  // terminal, never by a second Claude process resuming it — that would fork
+  // the conversation. This covers sends, queued turns and scheduled turns,
+  // which all arrive here.
+  if (provider === 'claude' && await isExternalSession(sessionId)) {
+    return dispatchToExternalSession(ws, sessionId, data, Boolean(beforeRun) || Object.keys(extraRuntimeOptions).length > 0);
+  }
 
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
@@ -624,6 +681,23 @@ async function handleChatSteer(
     return;
   }
 
+  // A terminal session takes a message typed mid-turn the way steering does:
+  // the TUI holds it and Claude reads it at its next tool call.
+  if (provider === 'claude' && await isExternalSession(sessionId)) {
+    const error = await sendToExternalSession(sessionId, composeExternalSessionText(content, attachments));
+    if (error) {
+      sendProtocolError(ws, 'STEER_UNAVAILABLE', error, sessionId, { messageId });
+      return;
+    }
+    sendJson(ws, {
+      kind: 'chat_steer_accepted',
+      sessionId,
+      messageId,
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
   const run = chatRunRegistry.getRun(sessionId);
   const steered = run?.status === 'running'
     ? await dependencies.runtime.steer(provider, sessionId, content, {
@@ -673,6 +747,15 @@ async function handleChatAbort(
   const run = chatRunRegistry.getRun(sessionId);
   if (!run || run.status !== 'running') {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
+    return;
+  }
+
+  // The terminal's turn belongs to the CLI process there; Escape stops it the
+  // same way it does at the keyboard.
+  if (run.provider === 'claude' && await isExternalSession(sessionId)) {
+    if (!(await interruptExternalSession(sessionId))) {
+      sendProtocolError(ws, 'NO_ACTIVE_RUN', 'The terminal session could not be interrupted.', sessionId);
+    }
     return;
   }
 

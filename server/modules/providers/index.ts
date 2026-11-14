@@ -15,6 +15,10 @@ export { sessionsService } from './services/sessions.service.js';
 // OpenCode turn servers a killed CloudCLI process left running.
 export { reapOrphanedOpenCodeServers } from './list/opencode/opencode-runtime.provider.js';
 
+// listLiveClaudeCliProcesses: used by the external-sessions module to find the
+// terminal Claude CLI processes the web chat can attach to.
+export { listLiveClaudeCliProcesses } from './services/claude-cli-liveness.service.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 

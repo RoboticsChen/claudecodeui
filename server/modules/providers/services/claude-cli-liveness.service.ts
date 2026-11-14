@@ -2,6 +2,8 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import type { LiveClaudeCliProcess } from '@/shared/types.js';
+
 /**
  * One Claude CLI process that is currently producing a response.
  *
@@ -63,8 +65,8 @@ async function isRecordedProcessAlive(pid: number, procStart: unknown): Promise<
   }
 }
 
-/** Reads one registry file, returning null for anything that is not a live busy session. */
-async function readLiveBusySession(filePath: string): Promise<LiveClaudeCliSession | null> {
+/** Reads one registry file, returning null for anything that is not a live CLI process. */
+async function readLiveProcess(filePath: string): Promise<LiveClaudeCliProcess | null> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await fsp.readFile(filePath, 'utf8'));
@@ -81,7 +83,7 @@ async function readLiveBusySession(filePath: string): Promise<LiveClaudeCliSessi
 
   const providerSessionId = typeof record.sessionId === 'string' ? record.sessionId : '';
   const pid = typeof record.pid === 'number' ? record.pid : NaN;
-  if (!providerSessionId || !Number.isInteger(pid) || pid <= 0 || record.status !== 'busy') {
+  if (!providerSessionId || !Number.isInteger(pid) || pid <= 0) {
     return null;
   }
 
@@ -89,8 +91,38 @@ async function readLiveBusySession(filePath: string): Promise<LiveClaudeCliSessi
     return null;
   }
 
-  const startedAt = typeof record.startedAt === 'number' ? record.startedAt : Date.now();
-  return { providerSessionId, startedAt };
+  return {
+    pid,
+    providerSessionId,
+    cwd: typeof record.cwd === 'string' && record.cwd ? record.cwd : null,
+    status: record.status === 'busy' ? 'busy' : 'idle',
+    startedAt: typeof record.startedAt === 'number' ? record.startedAt : Date.now(),
+  };
+}
+
+/**
+ * Lists every Claude CLI process that is alive right now, busy or idle.
+ *
+ * Used by the external-sessions module, which needs idle processes too: an
+ * idle terminal is exactly the one a message from the web chat is typed into.
+ * Recomputed on every call for the same reason as `listBusyClaudeCliSessions`.
+ */
+export async function listLiveClaudeCliProcesses(): Promise<LiveClaudeCliProcess[]> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(registryDirectory());
+  } catch {
+    // No registry directory at all is the normal case for an install that has
+    // never run the CLI, and an unreadable one is not worth failing a poll for.
+    return [];
+  }
+
+  const registryFiles = entries.filter((entry) => entry.endsWith('.json')).slice(0, MAX_REGISTRY_FILES);
+  const processes = await Promise.all(
+    registryFiles.map((entry) => readLiveProcess(path.join(registryDirectory(), entry))),
+  );
+
+  return processes.filter((entry): entry is LiveClaudeCliProcess => entry !== null);
 }
 
 /**
@@ -103,19 +135,8 @@ async function readLiveBusySession(filePath: string): Promise<LiveClaudeCliSessi
  * is recomputed on every read instead of being cached or persisted.
  */
 export async function listBusyClaudeCliSessions(): Promise<LiveClaudeCliSession[]> {
-  let entries: string[];
-  try {
-    entries = await fsp.readdir(registryDirectory());
-  } catch {
-    // No registry directory at all is the normal case for an install that has
-    // never run the CLI, and an unreadable one is not worth failing a poll for.
-    return [];
-  }
-
-  const registryFiles = entries.filter((entry) => entry.endsWith('.json')).slice(0, MAX_REGISTRY_FILES);
-  const sessions = await Promise.all(
-    registryFiles.map((entry) => readLiveBusySession(path.join(registryDirectory(), entry))),
-  );
-
-  return sessions.filter((session): session is LiveClaudeCliSession => session !== null);
+  const processes = await listLiveClaudeCliProcesses();
+  return processes
+    .filter((entry) => entry.status === 'busy')
+    .map(({ providerSessionId, startedAt }) => ({ providerSessionId, startedAt }));
 }

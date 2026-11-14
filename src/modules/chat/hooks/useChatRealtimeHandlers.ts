@@ -146,6 +146,17 @@ export function useChatRealtimeHandlers({
           return;
         }
 
+        case 'transcript_changed': {
+          // A session running in a tmux terminal wrote to its transcript. Its
+          // turn streams nothing live, so the viewed conversation follows the
+          // persisted transcript instead — while the turn runs, not only when
+          // it completes. Other sessions catch up when they are opened.
+          if (sid && sid === activeViewSessionId) {
+            void requestLatestMessages(sid, isActiveRef.current);
+          }
+          return;
+        }
+
         case 'chat_subscribed': {
           // Ack for chat.subscribe: authoritative processing state plus any
           // pending tool-permission prompts for the run.
