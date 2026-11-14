@@ -5,6 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
+import { buildShellCommandForSession, isExternalSessionMonitorRunning } from '@/modules/external-sessions/index.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -633,11 +634,22 @@ export function handleShellConnection(
           return;
         }
 
-        const { command: shellCommand, claudeFollowsAppTheme } = buildShellCommand(
+        const defaultLaunch = buildShellCommand(
           data,
           dependencies,
           resolvedProjectPath,
         );
+        // A Claude session opens in its tmux terminal — the one the web chat
+        // types into — instead of a second CLI resumed here, which would fork
+        // the conversation. The CLI then paints in its own theme.
+        const terminalCommand = isExternalSessionMonitorRunning() && provider === 'claude' && hasSession && sessionId && !isPlainShell
+          ? await buildShellCommandForSession(sessionId, {
+            extraFlags: readBoolean(data.bypassPermissions) ? '--dangerously-skip-permissions' : '',
+          })
+          : null;
+        const { command: shellCommand, claudeFollowsAppTheme } = terminalCommand
+          ? { command: terminalCommand, claudeFollowsAppTheme: false }
+          : defaultLaunch;
         const resumeSessionId = resolveResumeSessionId(data, dependencies);
         const claudeColorScheme = claudeFollowsAppTheme ? colorScheme : null;
         const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';

@@ -7,8 +7,14 @@ import { sessionsDb } from '@/modules/database/index.js';
 import { listLiveClaudeCliProcesses, sessionSynchronizerService } from '@/modules/providers/index.js';
 import type { chatRunRegistry } from '@/modules/websocket/index.js';
 import {
+  buildAttachedTmuxSessionCommand,
+  captureTmuxPane,
   clearTmuxPaneInput,
+  createDetachedTmuxSession,
+  hasTmuxSession,
+  isTmuxInstalled,
   listTmuxPanes,
+  quoteShellArgument,
   resolveTmuxPaneForPid,
   sendEscapeToTmuxPane,
   submitTextToTmuxPane,
@@ -78,6 +84,21 @@ const SEND_GRACE_MS = 3_000;
 const INTERRUPT_GRACE_MS = 3_000;
 /** How often an unindexed CLI session is looked for on disk again. */
 const INDEX_RETRY_MS = 5_000;
+/** How long a Claude CLI started for the web chat may take to show its input box. */
+const SPAWN_READY_TIMEOUT_MS = 45_000;
+const SPAWN_POLL_MS = 300;
+/**
+ * Flags every Claude CLI this module starts gets. The web chat cannot answer
+ * a permission prompt in the terminal, so the default skips them; set
+ * `CLOUDCLI_TERMINAL_CLAUDE_FLAGS` (shell syntax) to override.
+ */
+const DEFAULT_TERMINAL_CLAUDE_FLAGS = '--permission-mode bypassPermissions';
+/**
+ * Prompts a terminal can show that a pasted message must never land in: the
+ * TUI would take the text as the answer. Sends are refused while one shows.
+ */
+const BLOCKING_PROMPT_PATTERN = /trust this folder|Do you trust|Do you want to proceed\?|Resume from summary/i;
+const SAFE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const registryDirectory = () => path.join(os.homedir(), '.claude', 'sessions');
 const projectsDirectory = () => path.join(os.homedir(), '.claude', 'projects');
@@ -89,6 +110,14 @@ const externalRuns = new Map<string, { run: ChatRun; startedAt: number }>();
 /** `pid → paneId` once resolved; a pid never moves to another pane. */
 const paneByPid = new Map<number, string>();
 const lastIndexAttemptAt = new Map<string, number>();
+/** Every live CLI process the last scan saw, tmux or not. */
+let lastLiveProcesses: LiveClaudeCliProcess[] = [];
+/**
+ * Sessions whose terminal this module is starting, by app session id. While
+ * one is pending its run is kept open (the CLI reads idle until the message
+ * is typed in), and a second send for it waits for the same start.
+ */
+const pendingStarts = new Map<string, Promise<string | null>>();
 
 let scanTimer: ReturnType<typeof setInterval> | null = null;
 let registryWatcher: FSWatcher | null = null;
@@ -162,7 +191,7 @@ function reconcileRun(attachment: Attachment): void {
   }
 
   const entry = externalRuns.get(attachment.appSessionId);
-  if (entry && Date.now() - entry.startedAt >= SEND_GRACE_MS) {
+  if (entry && !pendingStarts.has(attachment.appSessionId) && Date.now() - entry.startedAt >= SEND_GRACE_MS) {
     completeExternalRun(attachment.appSessionId, { exitCode: 0 });
   }
 }
@@ -276,6 +305,7 @@ async function resolvePane(pid: number, panes: Map<number, string>): Promise<str
 
 async function scanOnce(): Promise<void> {
   const [processes, panes] = await Promise.all([listLiveClaudeCliProcesses(), listTmuxPanes()]);
+  lastLiveProcesses = processes;
   const seen = new Set<string>();
 
   for (const cliProcess of processes) {
@@ -286,6 +316,14 @@ async function scanOnce(): Promise<void> {
 
     let session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
     if (!session) {
+      await indexCliSession(cliProcess.providerSessionId);
+      session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
+    }
+    if (session && !session.jsonl_path) {
+      // A session the web chat started has no transcript on record until the
+      // CLI writes its first row; the history reader and the live refresh both
+      // need the path, so it is looked for now instead of at the watcher's
+      // next poll.
       await indexCliSession(cliProcess.providerSessionId);
       session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
     }
@@ -373,6 +411,237 @@ async function findAttachment(appSessionId: string): Promise<Attachment | null> 
   return attachments.get(appSessionId) ?? null;
 }
 
+/** The pane's text, with a missing pane read as an empty screen. */
+async function readPaneText(paneId: string): Promise<string> {
+  return (await captureTmuxPane(paneId)) ?? '';
+}
+
+/**
+ * Whether the Claude TUI in a pane shows its input box: a line that starts
+ * with `❯` at column 0 right under a rule. Dialogs (folder trust, permission
+ * prompts) draw their `❯` indented, so they do not count.
+ */
+function paneShowsInputBox(text: string): boolean {
+  const lines = text.split('\n');
+  // The TUI follows `❯` with a no-break space (U+00A0), so `\s` rather than ' '.
+  return lines.some((line, index) => /^❯(\s|$)/u.test(line) && index > 0 && /^─{10,}/.test(lines[index - 1] ?? ''));
+}
+
+/** The absolute path of `claude` on this server's PATH, so the pane does not depend on the tmux server's. */
+async function resolveClaudeBinary(): Promise<string | null> {
+  for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!directory) {
+      continue;
+    }
+    const candidate = path.join(directory, 'claude');
+    try {
+      await fsp.access(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here.
+    }
+  }
+  return null;
+}
+
+/** `cc-<folder>` like the `ccode` shell function, with a number when taken. */
+async function pickTmuxSessionName(cwd: string): Promise<string> {
+  const base = `cc-${path.basename(cwd).replace(/[^A-Za-z0-9_-]/g, '_') || 'session'}`;
+  let name = base;
+  for (let suffix = 2; await hasTmuxSession(name); suffix += 1) {
+    name = `${base}-${suffix}`;
+  }
+  return name;
+}
+
+/**
+ * A live Claude CLI process for this provider session that is not in tmux,
+ * so the web chat cannot type into it. Starting a second CLI on the same
+ * session would fork the conversation, which is exactly what this module
+ * exists to prevent.
+ */
+function findUnattachableProcess(providerSessionId: string): LiveClaudeCliProcess | null {
+  return lastLiveProcesses.find((entry) => entry.providerSessionId === providerSessionId) ?? null;
+}
+
+function describeUnattachableProcess(cliProcess: LiveClaudeCliProcess): string {
+  return `This conversation is already open in a Claude CLI outside tmux (pid ${cliProcess.pid}). `
+    + 'Continue it there, or close it so the web chat can open it in a tmux terminal.';
+}
+
+/**
+ * The provider session id the terminal resumes, or a new one for a session
+ * that has never run. A new id is recorded on the session row before the CLI
+ * starts, so the row and the transcript the CLI writes agree from its first
+ * line on.
+ */
+async function resolveTerminalSessionTarget(
+  session: NonNullable<ReturnType<typeof sessionsDb.getSessionById>>,
+): Promise<{ providerSessionId: string; resume: boolean } | string> {
+  const existing = session.provider_session_id;
+  if (existing) {
+    if (!SAFE_SESSION_ID_PATTERN.test(existing)) {
+      return `Session id "${existing}" cannot be passed to the Claude CLI.`;
+    }
+    const transcript = session.jsonl_path ?? await findTranscriptPath(existing);
+    return { providerSessionId: existing, resume: Boolean(transcript) };
+  }
+
+  // App ids are UUIDs, which is what `--session-id` takes; reusing it keeps
+  // the app id and the provider id the same.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.session_id)) {
+    return `Session id "${session.session_id}" is not a UUID the Claude CLI can take.`;
+  }
+  sessionsDb.assignProviderSessionId(session.session_id, session.session_id);
+  return { providerSessionId: session.session_id, resume: false };
+}
+
+/** The shell command a pane runs to start the Claude CLI for a session. */
+function buildClaudeCommand(claudeBinary: string, target: { providerSessionId: string; resume: boolean }, model?: string): string {
+  const flags = process.env.CLOUDCLI_TERMINAL_CLAUDE_FLAGS ?? DEFAULT_TERMINAL_CLAUDE_FLAGS;
+  const modelFlag = model && model !== 'default' && /^[A-Za-z0-9._[\]-]+$/.test(model) ? ` --model ${quoteShellArgument(model)}` : '';
+  const sessionFlag = target.resume
+    ? `--resume ${quoteShellArgument(target.providerSessionId)}`
+    : `--session-id ${quoteShellArgument(target.providerSessionId)}`;
+  return `exec ${quoteShellArgument(claudeBinary)} ${flags}${modelFlag} ${sessionFlag}`;
+}
+
+/**
+ * Waits until the CLI started in `paneId` is registered for the session and
+ * shows its input box. Returns an error message, or null once it is ready.
+ */
+async function waitForTerminalReady(paneId: string, panePid: number, providerSessionId: string, tmuxName: string): Promise<string | null> {
+  const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
+  let lastText = '';
+  while (Date.now() < deadline) {
+    const text = await captureTmuxPane(paneId);
+    if (text === null) {
+      const tail = lastText.trim().split('\n').slice(-3).join(' ').trim();
+      return `Claude exited before it was ready${tail ? `: ${tail}` : '.'}`;
+    }
+    lastText = text;
+
+    if (BLOCKING_PROMPT_PATTERN.test(text)) {
+      return `Claude is asking a question in the terminal before it can start. Answer it with \`tmux attach -t ${tmuxName}\`, then send again.`;
+    }
+
+    const processes = await listLiveClaudeCliProcesses();
+    const registered = processes.some((entry) => entry.providerSessionId === providerSessionId && entry.pid === panePid);
+    if (registered && paneShowsInputBox(text)) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, SPAWN_POLL_MS));
+  }
+  return `Claude did not become ready in the terminal within ${SPAWN_READY_TIMEOUT_MS / 1000}s. Check it with \`tmux attach -t ${tmuxName}\`.`;
+}
+
+/** Holds a run open while the terminal starts, so the composer shows it as working. */
+function startPendingRun(appSessionId: string, providerSessionId: string | null): void {
+  if (!dependencies || dependencies.runRegistry.getRun(appSessionId)?.status === 'running') {
+    return;
+  }
+  const run = dependencies.runRegistry.startRun({
+    appSessionId,
+    provider: 'claude',
+    providerSessionId,
+    connection: null,
+    userId: null,
+  });
+  if (!run) {
+    return;
+  }
+  for (const connection of dependencies.connections) {
+    run.writer.updateWebSocket(connection);
+  }
+  externalRuns.set(appSessionId, { run, startedAt: Date.now() });
+  run.writer.send(createNormalizedMessage({
+    kind: 'status',
+    text: 'Starting Claude in a terminal',
+    canInterrupt: false,
+    sessionId: providerSessionId ?? appSessionId,
+    provider: 'claude',
+  }));
+}
+
+async function startTerminalForSession(appSessionId: string, model?: string): Promise<string | null> {
+  const session = sessionsDb.getSessionById(appSessionId);
+  if (!session || session.provider !== 'claude') {
+    return 'The session no longer exists.';
+  }
+
+  const cwd = session.project_path;
+  try {
+    if (!cwd || !(await fsp.stat(cwd)).isDirectory()) {
+      return `The project folder ${cwd ?? ''} does not exist.`;
+    }
+  } catch {
+    return `The project folder ${cwd} does not exist.`;
+  }
+
+  const target = await resolveTerminalSessionTarget(session);
+  if (typeof target === 'string') {
+    return target;
+  }
+
+  const unattachable = findUnattachableProcess(target.providerSessionId);
+  if (unattachable) {
+    return describeUnattachableProcess(unattachable);
+  }
+
+  const claudeBinary = await resolveClaudeBinary();
+  if (!claudeBinary) {
+    return 'The Claude CLI was not found on the server\'s PATH.';
+  }
+
+  startPendingRun(appSessionId, target.providerSessionId);
+  const tmuxName = await pickTmuxSessionName(cwd);
+  let pane: { paneId: string; panePid: number };
+  try {
+    pane = await createDetachedTmuxSession({ name: tmuxName, cwd, command: buildClaudeCommand(claudeBinary, target, model) });
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  console.log('[ExternalSessions] started Claude in tmux', { appSessionId, tmuxName, pane: pane.paneId, resume: target.resume });
+  const notReady = await waitForTerminalReady(pane.paneId, pane.panePid, target.providerSessionId, tmuxName);
+  if (notReady) {
+    return notReady;
+  }
+  await scan();
+  return attachments.has(appSessionId) ? null : 'The terminal started but could not be attached.';
+}
+
+/**
+ * Makes sure the session runs in a tmux terminal the web chat can type into,
+ * starting one when no CLI runs it. Returns an error message, or null when
+ * the session is attached.
+ *
+ * Concurrent calls for one session share the same start.
+ */
+async function ensureTerminalForSession(appSessionId: string, model?: string): Promise<string | null> {
+  if (await findAttachment(appSessionId)) {
+    return null;
+  }
+
+  const pending = pendingStarts.get(appSessionId);
+  if (pending) {
+    return pending;
+  }
+
+  const start = startTerminalForSession(appSessionId, model)
+    .catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+  pendingStarts.set(appSessionId, start);
+  try {
+    const error = await start;
+    if (error) {
+      completeExternalRun(appSessionId, { exitCode: 1 });
+    }
+    return error;
+  } finally {
+    pendingStarts.delete(appSessionId);
+  }
+}
+
 /**
  * Starts watching terminal Claude sessions. Idempotent.
  *
@@ -435,28 +704,58 @@ export function stopExternalSessionMonitor(): void {
 }
 
 /**
- * Whether an app session is currently a live terminal session the web chat
- * types into instead of starting its own Claude process.
+ * Whether the web chat drives this session through a tmux terminal rather
+ * than through a Claude process of its own.
+ *
+ * True when a terminal already runs it, and also when nothing runs it yet
+ * and tmux is available: the first send then opens a terminal for it, so the
+ * conversation lives in exactly one CLI that both the web chat and the user's
+ * terminal can reach. False for non-Claude sessions and when tmux is missing.
  *
  * Used by the websocket module's chat gateway to route sends, steers and
  * stops for that session here.
  */
 export async function isExternalSession(appSessionId: string): Promise<boolean> {
-  return (await findAttachment(appSessionId)) !== null;
+  if (!dependencies) {
+    return false;
+  }
+  if (await findAttachment(appSessionId)) {
+    return true;
+  }
+  if (pendingStarts.has(appSessionId)) {
+    return true;
+  }
+  const session = sessionsDb.getSessionById(appSessionId);
+  return session?.provider === 'claude' && await isTmuxInstalled();
 }
 
 /**
  * Types a message from the web chat into the session's terminal and submits
- * it. A turn already running in the terminal simply queues it, the same as
- * typing ahead at the keyboard.
+ * it, opening a tmux terminal for the session first when none runs it. A turn
+ * already running in the terminal simply queues it, the same as typing ahead
+ * at the keyboard.
  *
  * Used by the websocket module's chat gateway for `chat.send`, `chat.steer`
- * and queued/scheduled turns. Returns an error message, or null on success.
+ * and queued/scheduled turns. `model` only applies when a terminal has to be
+ * started. Returns an error message, or null on success.
  */
-export async function sendToExternalSession(appSessionId: string, text: string): Promise<string | null> {
-  const attachment = await findAttachment(appSessionId);
+export async function sendToExternalSession(
+  appSessionId: string,
+  text: string,
+  options: { model?: string } = {},
+): Promise<string | null> {
+  const startError = await ensureTerminalForSession(appSessionId, options.model);
+  if (startError) {
+    return startError;
+  }
+
+  const attachment = attachments.get(appSessionId);
   if (!attachment) {
     return 'The terminal session is no longer running.';
+  }
+
+  if (BLOCKING_PROMPT_PATTERN.test(await readPaneText(attachment.paneId))) {
+    return 'The terminal is waiting for an answer to a prompt; answer it there first.';
   }
 
   try {
@@ -471,6 +770,70 @@ export async function sendToExternalSession(appSessionId: string, text: string):
   attachment.ignoreBusyUntil = 0;
   startExternalRun(attachment);
   return null;
+}
+
+/**
+ * Whether the terminal-session monitor runs in this process.
+ *
+ * Used by the websocket module's Shell handler to skip the asynchronous
+ * terminal lookup entirely when the monitor is off (tests, embedded use), so
+ * the Shell view launches exactly as it always did.
+ */
+export function isExternalSessionMonitorRunning(): boolean {
+  return dependencies !== null;
+}
+
+/**
+ * The command the Shell view runs for a Claude session, so that it shows the
+ * one terminal the web chat also uses instead of starting a second CLI.
+ *
+ * - A session already in tmux: attach to its tmux session.
+ * - A session no CLI runs: start it in a new tmux session, attached.
+ * - A session open in a CLI outside tmux: a message saying so (a second CLI
+ *   would fork the conversation).
+ *
+ * Returns null when tmux is unavailable or the session is not Claude's, and
+ * the Shell view keeps its own command. Used by the websocket module's Shell
+ * handler.
+ */
+export async function buildShellCommandForSession(
+  appSessionId: string,
+  options: { extraFlags?: string } = {},
+): Promise<string | null> {
+  if (!dependencies || !(await isTmuxInstalled())) {
+    return null;
+  }
+
+  const attachment = await findAttachment(appSessionId);
+  if (attachment) {
+    return `exec tmux attach-session -t ${quoteShellArgument(attachment.paneId)}`;
+  }
+
+  const session = sessionsDb.getSessionById(appSessionId);
+  if (!session || session.provider !== 'claude' || !session.project_path) {
+    return null;
+  }
+
+  const target = await resolveTerminalSessionTarget(session);
+  if (typeof target === 'string') {
+    return `printf '%s\\n' ${quoteShellArgument(target)}`;
+  }
+  const unattachable = findUnattachableProcess(target.providerSessionId);
+  if (unattachable) {
+    return `printf '%s\\n' ${quoteShellArgument(describeUnattachableProcess(unattachable))}`;
+  }
+
+  const claudeBinary = await resolveClaudeBinary();
+  if (!claudeBinary) {
+    return null;
+  }
+  const extraFlags = options.extraFlags?.trim() ? ` ${options.extraFlags.trim()}` : '';
+  const claudeCommand = buildClaudeCommand(claudeBinary, target) + extraFlags;
+  return buildAttachedTmuxSessionCommand({
+    name: await pickTmuxSessionName(session.project_path),
+    cwd: session.project_path,
+    command: claudeCommand,
+  });
 }
 
 /**

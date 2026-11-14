@@ -265,7 +265,7 @@ async function dispatchToExternalSession(
   rewritesHistory: boolean,
 ): Promise<{ started: boolean; error: string | null }> {
   if (rewritesHistory) {
-    const error = 'Editing an earlier message is not available while the session runs in a terminal.';
+    const error = 'Editing an earlier message is not available for Claude sessions, which run in a terminal.';
     if (ws) {
       sendProtocolError(ws, 'EXTERNAL_SESSION_UNSUPPORTED', error, sessionId);
     }
@@ -273,8 +273,12 @@ async function dispatchToExternalSession(
   }
 
   const content = typeof data.content === 'string' ? data.content : '';
-  const attachments = readVerifiedAttachments((data.options ?? {}) as AnyRecord);
-  const error = await sendToExternalSession(sessionId, composeExternalSessionText(content, attachments));
+  const clientOptions = (data.options ?? {}) as AnyRecord;
+  const attachments = readVerifiedAttachments(clientOptions);
+  // The model only matters when the send has to start a terminal; a running
+  // CLI keeps its own (switch it with /model).
+  const model = typeof clientOptions.model === 'string' ? clientOptions.model : undefined;
+  const error = await sendToExternalSession(sessionId, composeExternalSessionText(content, attachments), { model });
   if (error && ws) {
     sendProtocolError(ws, 'EXTERNAL_SEND_FAILED', error, sessionId);
   }
@@ -682,8 +686,9 @@ async function handleChatSteer(
   }
 
   // A terminal session takes a message typed mid-turn the way steering does:
-  // the TUI holds it and Claude reads it at its next tool call.
-  if (provider === 'claude' && await isExternalSession(sessionId)) {
+  // the TUI holds it and Claude reads it at its next tool call. Only a turn
+  // that is running counts; with none, the composer sends it as a new turn.
+  if (provider === 'claude' && chatRunRegistry.getRun(sessionId)?.status === 'running' && await isExternalSession(sessionId)) {
     const error = await sendToExternalSession(sessionId, composeExternalSessionText(content, attachments));
     if (error) {
       sendProtocolError(ws, 'STEER_UNAVAILABLE', error, sessionId, { messageId });
@@ -970,11 +975,17 @@ export async function runDetachedChatTurn(
     // interrupted run end before this turn's stream begins. The interrupted
     // run's own dispatch settles later through completeRunIfCurrent, which is
     // scoped to that run and cannot touch the one started here.
-    const aborted = await dependencies.runtime.abort(activeRun.provider, input.sessionId);
-    chatRunRegistry.completeRunIfCurrent(activeRun, {
-      exitCode: aborted ? 0 : 1,
-      aborted: true,
-    });
+    // A terminal session's turn is stopped in the terminal (Escape), which
+    // also ends its run; the SDK runtime has nothing to abort there.
+    if (provider === 'claude' && await isExternalSession(input.sessionId)) {
+      await interruptExternalSession(input.sessionId);
+    } else {
+      const aborted = await dependencies.runtime.abort(activeRun.provider, input.sessionId);
+      chatRunRegistry.completeRunIfCurrent(activeRun, {
+        exitCode: aborted ? 0 : 1,
+        aborted: true,
+      });
+    }
   }
 
   return dispatchRun(

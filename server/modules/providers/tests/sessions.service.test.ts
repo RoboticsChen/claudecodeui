@@ -428,6 +428,27 @@ test('the running snapshot lists every live CLI session, idle ones included, wit
   });
 });
 
+test('a process CloudCLI\'s own SDK started is never reported as a CLI session', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('sdk-session', 'claude', '/tmp/running-project');
+    sessionsDb.assignProviderSessionId('sdk-session', 'claude-native-sdk');
+
+    // An SDK process idling between chat turns can keep reading `busy` in the
+    // registry; the chat-run registry is what tracks CloudCLI's own runs.
+    await withClaudeCliRegistry(
+      [{ pid: process.pid, sessionId: 'claude-native-sdk', status: 'busy', entrypoint: 'claudecodeui', startedAt: 1_000 }],
+      async () => await withProviders(
+        { claude: { run: async () => undefined, abort: () => false } },
+        async () => {
+          const snapshot = await sessionsService.getRunningSessionsSnapshot();
+          assert.deepEqual(snapshot.sessions, []);
+          assert.deepEqual(snapshot.cliSessions, []);
+        },
+      ),
+    );
+  });
+});
+
 test('a CLI turn does not duplicate a session already running a chat run', { concurrency: false }, async () => {
   await withIsolatedDatabase(async () => {
     sessionsDb.createAppSession('both-session', 'claude', '/tmp/running-project');

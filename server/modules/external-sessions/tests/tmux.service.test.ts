@@ -35,3 +35,12 @@ test('the walk stops after a bounded number of parents', async () => {
   const panes = new Map([[490, '%9']]);
   assert.equal(await resolveTmuxPaneForPid(500, panes, parentReader(tree)), null);
 });
+
+test('a quoted shell argument reaches the program unchanged', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { quoteShellArgument } = await import('@/modules/external-sessions/services/tmux.service.js');
+  for (const value of ["plain", "it's", "a b", "$HOME `x` \"q\" \\ ;|&", '']) {
+    const echoed = execFileSync('sh', ['-c', `printf '%s' ${quoteShellArgument(value)}`], { encoding: 'utf8' });
+    assert.equal(echoed, value);
+  }
+});
