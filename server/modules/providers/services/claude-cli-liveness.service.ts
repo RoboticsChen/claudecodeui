@@ -5,17 +5,6 @@ import path from 'node:path';
 import type { LiveClaudeCliProcess } from '@/shared/types.js';
 
 /**
- * One Claude CLI process that is currently producing a response.
- *
- * `providerSessionId` is Claude's own session id, which is what the registry
- * records; callers map it onto an app session themselves.
- */
-type LiveClaudeCliSession = {
-  providerSessionId: string;
-  startedAt: number;
-};
-
-/**
  * Claude Code keeps one file per running session here, named `<pid>.json`.
  * The directory belongs to the CLI, not to CloudCLI: it is only ever read.
  */
@@ -105,7 +94,11 @@ async function readLiveProcess(filePath: string): Promise<LiveClaudeCliProcess |
  *
  * Used by the external-sessions module, which needs idle processes too: an
  * idle terminal is exactly the one a message from the web chat is typed into.
- * Recomputed on every call for the same reason as `listBusyClaudeCliSessions`.
+ * Also used by the providers module's sessions service for the
+ * running-sessions poll: busy processes are reported as turns in progress,
+ * and every live process is listed for the sidebar's Running tab.
+ * Liveness is ephemeral, so it is recomputed on every call instead of being
+ * cached or persisted.
  */
 export async function listLiveClaudeCliProcesses(): Promise<LiveClaudeCliProcess[]> {
   let entries: string[];
@@ -123,20 +116,4 @@ export async function listLiveClaudeCliProcesses(): Promise<LiveClaudeCliProcess
   );
 
   return processes.filter((entry): entry is LiveClaudeCliProcess => entry !== null);
-}
-
-/**
- * Lists the Claude CLI sessions that are mid-turn right now.
- *
- * Used by the providers module's sessions service so the running-sessions poll
- * also reports turns driven outside CloudCLI's own chat runs — including the
- * `claude` processes CloudCLI itself spawns for the Shell view, which live in
- * the PTY map rather than the chat-run registry. Liveness is ephemeral, so it
- * is recomputed on every read instead of being cached or persisted.
- */
-export async function listBusyClaudeCliSessions(): Promise<LiveClaudeCliSession[]> {
-  const processes = await listLiveClaudeCliProcesses();
-  return processes
-    .filter((entry) => entry.status === 'busy')
-    .map(({ providerSessionId, startedAt }) => ({ providerSessionId, startedAt }));
 }

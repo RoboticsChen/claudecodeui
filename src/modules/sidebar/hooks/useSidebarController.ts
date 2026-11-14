@@ -61,6 +61,11 @@ type UseSidebarControllerArgs = {
   activeSessions: ReadonlySet<string>;
   /** The busy sessions only running background work; unlike the rest of `activeSessions` they can be deleted. */
   backgroundSessionIds: ReadonlySet<string>;
+  /**
+   * Sessions with a live Claude CLI process in a terminal, idle ones included.
+   * Listed on the Running tab alongside the busy sessions; never treated as busy.
+   */
+  liveCliSessionIds?: ReadonlySet<string>;
   isLoading: boolean;
   isMobile: boolean;
   t: TFunction;
@@ -84,6 +89,7 @@ export function useSidebarController({
   selectedSession: _selectedSession,
   activeSessions,
   backgroundSessionIds,
+  liveCliSessionIds,
   isLoading,
   isMobile,
   t,
@@ -189,7 +195,14 @@ export function useSidebarController({
   const onRefreshRef = useRef(onRefresh);
 
   const isSidebarCollapsed = !isMobile && !sidebarVisible;
-  const activeSessionIds = activeSessions;
+  // The Running tab lists every session that is busy here or has a live CLI
+  // process in a terminal, even an idle one waiting for input.
+  const activeSessionIds = useMemo<ReadonlySet<string>>(() => {
+    if (!liveCliSessionIds || liveCliSessionIds.size === 0) {
+      return activeSessions;
+    }
+    return new Set([...activeSessions, ...liveCliSessionIds]);
+  }, [activeSessions, liveCliSessionIds]);
   const runningSessionsCount = activeSessionIds.size;
 
   useEffect(() => {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
-import { listBusyClaudeCliSessions } from '@/modules/providers/services/claude-cli-liveness.service.js';
+import { listLiveClaudeCliProcesses } from '@/modules/providers/services/claude-cli-liveness.service.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
 import type {
   BackgroundTaskSummary,
@@ -41,6 +41,27 @@ type RunningSessionEntry = {
   canInterrupt?: false;
   statusText?: string;
   tasks?: BackgroundTaskSummary[];
+};
+
+/**
+ * One interactive Claude CLI process that is alive right now, busy or idle,
+ * mapped onto its app session.
+ *
+ * Reported alongside the busy list so the sidebar's Running tab can list a
+ * terminal session for as long as its process runs, not only while it is
+ * producing a response. It carries no processing state of its own: an idle
+ * entry must never make a session read as busy.
+ */
+type LiveCliSessionEntry = {
+  sessionId: string;
+  provider: LLMProvider;
+  status: 'busy' | 'idle';
+  startedAt: number;
+};
+
+type RunningSessionsSnapshot = {
+  sessions: RunningSessionEntry[];
+  cliSessions: LiveCliSessionEntry[];
 };
 
 type CreateAppSessionResult = {
@@ -154,6 +175,15 @@ export const sessionsService = {
    * indicators should not attach to chat streams or request replayed messages.
    */
   async listRunningSessions(): Promise<RunningSessionEntry[]> {
+    return (await this.getRunningSessionsSnapshot()).sessions;
+  },
+
+  /**
+   * The running-sessions poll: the busy sessions (see `listRunningSessions`)
+   * plus every live Claude CLI session, idle ones included, read from one
+   * pass over the CLI's process registry.
+   */
+  async getRunningSessionsSnapshot(): Promise<RunningSessionsSnapshot> {
     const entries: RunningSessionEntry[] = chatRunRegistry.listRunningRuns();
     const runningById = new Map(entries.map((entry) => [entry.sessionId, entry]));
 
@@ -182,9 +212,27 @@ export const sessionsService = {
     // without this a session working under the Claude CLI — including one
     // CloudCLI spawned for its own Shell view — looks idle. A session already
     // listed above keeps its richer entry.
-    for (const live of await listBusyClaudeCliSessions()) {
+    const cliSessions: LiveCliSessionEntry[] = [];
+    const listedCliSessionIds = new Set<string>();
+    for (const live of await listLiveClaudeCliProcesses()) {
       const session = sessionsDb.getSessionByProviderSessionId(live.providerSessionId);
-      if (!session || runningById.has(session.session_id)) {
+      if (!session) {
+        continue;
+      }
+
+      // One process per session; a second registry entry for the same session
+      // (a stale `--resume` twin) would otherwise list it twice.
+      if (!listedCliSessionIds.has(session.session_id)) {
+        listedCliSessionIds.add(session.session_id);
+        cliSessions.push({
+          sessionId: session.session_id,
+          provider: session.provider as LLMProvider,
+          status: live.status,
+          startedAt: live.startedAt,
+        });
+      }
+
+      if (live.status !== 'busy' || runningById.has(session.session_id)) {
         continue;
       }
 
@@ -201,7 +249,7 @@ export const sessionsService = {
       runningById.set(session.session_id, entries[entries.length - 1]);
     }
 
-    return entries;
+    return { sessions: entries, cliSessions };
   },
 
   /**

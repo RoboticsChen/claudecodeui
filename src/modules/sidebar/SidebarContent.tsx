@@ -403,7 +403,7 @@ export default function SidebarContent({
               <p className="text-sm text-muted-foreground">
                 {runningSessionsCount > 0
                   ? t('running.noMatchingSessions', 'No running sessions match this search.')
-                  : t('running.emptyDescription', 'Active work will appear here while a provider is processing.')}
+                  : t('running.emptyDescription', 'Sessions appear here while a provider is processing or a Claude CLI session is open in a terminal.')}
               </p>
             </div>
           ) : (

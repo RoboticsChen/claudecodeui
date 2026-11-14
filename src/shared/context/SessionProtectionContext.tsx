@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useState,
 } from 'react';
 import type { ReactNode } from 'react';
 
@@ -25,6 +26,8 @@ type RunningSessionApiItem = {
 type RunningSessionsApiPayload = {
   data?: {
     sessions?: RunningSessionApiItem[];
+    /** Every live Claude CLI session, idle ones included. */
+    cliSessions?: Array<{ sessionId?: unknown }>;
   };
 };
 
@@ -41,6 +44,13 @@ const SessionProtectionStateContext = createContext<SessionActivityMap | null>(n
 const SessionProtectionActionsContext = createContext<SessionProtectionActions | null>(null);
 const BusySessionIdsContext = createContext<ReadonlySet<string> | null>(null);
 const BackgroundSessionIdsContext = createContext<ReadonlySet<string> | null>(null);
+const LiveCliSessionIdsContext = createContext<ReadonlySet<string> | null>(null);
+
+const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
+
+/** The same set when membership is unchanged, so a poll that saw the same sessions re-renders nothing. */
+const sameSessionIdSet = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean =>
+  left.size === right.size && [...left].every((sessionId) => right.has(sessionId));
 
 /**
  * The set of session ids whose activity passes `include`, with a stable
@@ -131,6 +141,11 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     isSessionProcessing,
     getSessionActivity,
   } = useSessionProtection();
+  // Sessions with a live Claude CLI process, read from the CLI's own process
+  // registry by the server. Kept apart from the activity map on purpose: an
+  // idle terminal must be listed on the Running tab without the session ever
+  // reading as busy (no spinner, no blocked delete, no composer lock).
+  const [liveCliSessionIds, setLiveCliSessionIds] = useState<ReadonlySet<string>>(EMPTY_SESSION_ID_SET);
 
   const refreshRunningSessions = useCallback(async () => {
     try {
@@ -141,6 +156,13 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
 
       const payload = (await response.json()) as RunningSessionsApiPayload;
       const sessions = Array.isArray(payload.data?.sessions) ? payload.data.sessions : [];
+      const cliSessions = Array.isArray(payload.data?.cliSessions) ? payload.data.cliSessions : [];
+      const nextLiveCliSessionIds = new Set(
+        cliSessions
+          .map((session) => session?.sessionId)
+          .filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0),
+      );
+      setLiveCliSessionIds((previous) => (sameSessionIdSet(previous, nextLiveCliSessionIds) ? previous : nextLiveCliSessionIds));
 
       syncProcessingSessions(
         sessions
@@ -203,9 +225,11 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     <SessionProtectionActionsContext.Provider value={actions}>
       <BusySessionIdsContext.Provider value={busySessionIds}>
         <BackgroundSessionIdsContext.Provider value={backgroundSessionIds}>
-          <SessionProtectionStateContext.Provider value={processingSessions}>
-            {children}
-          </SessionProtectionStateContext.Provider>
+          <LiveCliSessionIdsContext.Provider value={liveCliSessionIds}>
+            <SessionProtectionStateContext.Provider value={processingSessions}>
+              {children}
+            </SessionProtectionStateContext.Provider>
+          </LiveCliSessionIdsContext.Provider>
         </BackgroundSessionIdsContext.Provider>
       </BusySessionIdsContext.Provider>
     </SessionProtectionActionsContext.Provider>
@@ -236,6 +260,19 @@ export function useBackgroundSessionIdSet(): ReadonlySet<string> {
     throw new Error('useBackgroundSessionIdSet must be used within SessionProtectionProvider');
   }
   return backgroundSessionIds;
+}
+
+/**
+ * Used by the sidebar module's Running tab: the sessions whose Claude CLI
+ * process is alive in a terminal, busy or idle. Membership only — it never
+ * says a session is processing; use useBusySessionIdSet for that.
+ */
+export function useLiveCliSessionIdSet(): ReadonlySet<string> {
+  const liveCliSessionIds = useContext(LiveCliSessionIdsContext);
+  if (!liveCliSessionIds) {
+    throw new Error('useLiveCliSessionIdSet must be used within SessionProtectionProvider');
+  }
+  return liveCliSessionIds;
 }
 
 export function useProcessingSessions(): SessionActivityMap {

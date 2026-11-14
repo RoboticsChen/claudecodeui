@@ -227,9 +227,12 @@ async function withClaudeCliRegistry(
 ): Promise<void> {
   const homeDirectory = await mkdtemp(path.join(os.tmpdir(), 'claude-cli-registry-'));
   await mkdir(path.join(homeDirectory, '.claude', 'sessions'), { recursive: true });
-  for (const record of records) {
+  for (const [index, record] of records.entries()) {
+    // Named by position, not pid: several live fixtures share `process.pid`
+    // (the one pid every test can count on), and one file per pid would keep
+    // only the last of them. The reader keys nothing off the file name.
     await writeFile(
-      path.join(homeDirectory, '.claude', 'sessions', `${record.pid}.json`),
+      path.join(homeDirectory, '.claude', 'sessions', `${index}-${record.pid}.json`),
       JSON.stringify(record),
       'utf8',
     );
@@ -376,6 +379,49 @@ test('running sessions ignore registry files a crash left behind', { concurrency
         { claude: { run: async () => undefined, abort: () => false } },
         async () => {
           assert.deepEqual(await sessionsService.listRunningSessions(), []);
+        },
+      ),
+    );
+  });
+});
+
+test('the running snapshot lists every live CLI session, idle ones included, without marking them busy', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('idle-cli', 'claude', '/tmp/running-project');
+    sessionsDb.assignProviderSessionId('idle-cli', 'claude-native-idle-cli');
+    sessionsDb.createAppSession('busy-cli', 'claude', '/tmp/running-project');
+    sessionsDb.assignProviderSessionId('busy-cli', 'claude-native-busy-cli');
+
+    await withClaudeCliRegistry(
+      [
+        { pid: process.pid, sessionId: 'claude-native-idle-cli', status: 'idle', startedAt: 6_000 },
+        { pid: process.pid, sessionId: 'claude-native-busy-cli', status: 'busy', startedAt: 7_000 },
+        // Alive but never indexed: there is no app session to list it under.
+        { pid: process.pid, sessionId: 'claude-native-unknown', status: 'idle', startedAt: 8_000 },
+        // The process is gone, so the file is a leftover, not a live session.
+        { pid: 4_194_302, sessionId: 'claude-native-idle-cli', status: 'busy', startedAt: 9_000 },
+      ],
+      async () => await withProviders(
+        { claude: { run: async () => undefined, abort: () => false } },
+        async () => {
+          const snapshot = await sessionsService.getRunningSessionsSnapshot();
+          assert.deepEqual(
+            snapshot.sessions.map((session) => session.sessionId),
+            ['busy-cli'],
+            'only the busy process is a turn in progress',
+          );
+          assert.deepEqual(
+            [...snapshot.cliSessions].sort((left, right) => left.sessionId.localeCompare(right.sessionId)),
+            [
+              { sessionId: 'busy-cli', provider: 'claude', status: 'busy', startedAt: 7_000 },
+              { sessionId: 'idle-cli', provider: 'claude', status: 'idle', startedAt: 6_000 },
+            ],
+          );
+          assert.deepEqual(
+            await sessionsService.listRunningSessions(),
+            snapshot.sessions,
+            'the busy list is unchanged for its other callers',
+          );
         },
       ),
     );
