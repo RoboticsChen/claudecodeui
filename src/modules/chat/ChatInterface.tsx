@@ -289,6 +289,25 @@ function ChatInterface({
     });
   }, [isActive, requestLatestMessages, selectedProject, selectedSession, sendMessage]);
 
+  // A backgrounded mobile page often keeps its socket open, so no reconnect
+  // fires, yet the refreshes it attempted while frozen were dropped — and a
+  // finished turn sends no further signal. Showing the page again therefore
+  // runs the same catch-up as a reconnect, or the transcript stays stale.
+  useEffect(() => {
+    const catchUpWhenShown = () => {
+      if (document.visibilityState === 'visible') {
+        void handleWebSocketReconnect();
+      }
+    };
+    document.addEventListener('visibilitychange', catchUpWhenShown);
+    // iOS restores pages from the back-forward cache without a visibilitychange.
+    window.addEventListener('pageshow', catchUpWhenShown);
+    return () => {
+      document.removeEventListener('visibilitychange', catchUpWhenShown);
+      window.removeEventListener('pageshow', catchUpWhenShown);
+    };
+  }, [handleWebSocketReconnect]);
+
   useChatRealtimeHandlers({
     isActive,
     subscribe,

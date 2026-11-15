@@ -797,7 +797,11 @@ export function useSessionStore() {
         return { slot, ...result };
       } catch (error) {
         console.error(`[SessionStore] latest refresh failed for ${sessionId}:`, error);
-        return { slot, applied: false, changed: false, deferred: false };
+        // Reported as deferred so the refresh stays pending and is retried
+        // (on the next signal or activation) instead of being treated as
+        // done: a request dropped while a mobile page was frozen in the
+        // background is often the last signal a finished turn sends.
+        return { slot, applied: false, changed: false, deferred: true };
       }
     });
   }, [getSlot, notify]);
