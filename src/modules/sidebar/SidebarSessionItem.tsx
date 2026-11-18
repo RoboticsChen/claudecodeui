@@ -1,6 +1,6 @@
 import { memo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { Archive, Check, CheckSquare, Edit2, GitBranch, Loader2, MoreHorizontal, Square, Trash2, X } from 'lucide-react';
+import { Archive, Check, CheckSquare, Edit2, GitBranch, Loader2, MoreHorizontal, PauseCircle, Square, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Badge, Dialog, DialogContent, DialogTitle, LLMProviderLogo, Tooltip, buttonVariants } from '@/shared/ui';
@@ -34,6 +34,10 @@ type SidebarSessionItemProps = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches this session into an independent one; absent when its provider cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
+  /** A Claude CLI for this session is alive in a terminal, so it can be suspended. */
+  hasLiveTerminal?: boolean;
+  /** Closes the session's tmux terminal; offered only while `hasLiveTerminal`. */
+  onSuspendSession?: (sessionId: string) => void;
   /** This project's list is in bulk-selection mode: the row acts as a checkbox and hides its options. */
   isSelecting: boolean;
   /** Ticked for the pending bulk delete. Resolved by the list, which never ticks a running row. */
@@ -65,6 +69,8 @@ function SidebarSessionItem({
   onArchiveSession,
   onDeleteSession,
   onForkSession,
+  hasLiveTerminal = false,
+  onSuspendSession,
   isSelecting,
   isChecked,
   treeRow = false,
@@ -98,6 +104,7 @@ function SidebarSessionItem({
   // the desktop SessionOptions menu. The capability request is shared by rows.
   const forkableProviders = useSessionForkingProviders();
   const canFork = Boolean(onForkSession) && forkableProviders.has(session.__provider) && !isProcessing;
+  const suspendSession = hasLiveTerminal && onSuspendSession ? () => onSuspendSession(session.id) : undefined;
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
   // after the projectName → projectId migration.
@@ -382,6 +389,25 @@ function SidebarSessionItem({
                   </button>
                 )}
 
+                {suspendSession && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileOptionsOpen(false);
+                      suspendSession();
+                    }}
+                    className="flex min-h-12 w-full items-center gap-3 rounded-xl border border-border bg-muted/35 px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+                  >
+                    <PauseCircle className="h-5 w-5 flex-shrink-0" />
+                    <span>
+                      <span className="block text-sm font-medium">{t('sessions.suspendSession', 'Suspend session')}</span>
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        {t('sessions.suspendSessionDescription', 'Close its tmux terminal. The next message resumes it.')}
+                      </span>
+                    </span>
+                  </button>
+                )}
+
                 {!isProcessing && (
                   <>
                     <button
@@ -538,6 +564,7 @@ function SidebarSessionItem({
             onArchiveSession={onArchiveSession}
             onDeleteSession={onDeleteSession}
             onFork={onForkSession ? () => onForkSession(session) : undefined}
+            onSuspend={suspendSession}
             t={t}
           />
         )}

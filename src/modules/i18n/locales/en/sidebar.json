@@ -28,6 +28,8 @@
     "newSession": "New Session",
     "deleteSession": "Delete Session",
     "renameSession": "Rename Session",
+    "suspendSession": "Suspend session",
+    "suspendSessionDescription": "Close its tmux terminal. The next message resumes it.",
     "noSessions": "No sessions yet",
     "loadingSessions": "Loading sessions...",
     "unnamed": "Unnamed",
@@ -126,6 +128,7 @@
     "restoreSessionFailed": "Failed to restore session. Please try again.",
     "restoreSessionError": "Error restoring session. Please try again.",
     "forkSessionError": "Could not fork this session. Please try again.",
+    "suspendSessionError": "Could not suspend this session: {{reason}}",
     "deleteSessionsPartialFailure_one": "{{count}} session out of {{total}} could not be deleted. Please try again.",
     "deleteSessionsPartialFailure_other": "{{count}} of {{total}} sessions could not be deleted. Please try again."
   },

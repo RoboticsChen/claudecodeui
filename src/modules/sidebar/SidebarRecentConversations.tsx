@@ -284,6 +284,9 @@ export default function SidebarRecentConversations({
                     __projectId: conversation.projectId ?? undefined,
                   })
                   : undefined}
+                onSuspend={sessionActions.onSuspendSession && sessionActions.liveCliSessionIds?.has(conversation.sessionId)
+                  ? () => sessionActions.onSuspendSession?.(conversation.sessionId)
+                  : undefined}
                 t={t}
               />
             </div>

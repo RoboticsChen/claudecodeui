@@ -314,3 +314,16 @@ export async function clearTmuxPaneInput(paneId: string): Promise<void> {
   }
   await runTmux(['send-keys', '-t', paneId, ...keys]);
 }
+
+/**
+ * Closes a tmux pane, ending the program in it (tmux sends it SIGHUP). When
+ * it is the last pane of its tmux session, the tmux session closes with it.
+ *
+ * Used by the external-sessions service to suspend a terminal Claude session
+ * from the web chat. Only the pane is closed, never the whole tmux session:
+ * a session the user started themselves may hold other windows or panes
+ * (a shell next to Claude) that have nothing to do with this conversation.
+ */
+export async function killTmuxPane(paneId: string): Promise<void> {
+  await runTmux(['kill-pane', '-t', paneId]);
+}

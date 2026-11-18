@@ -1666,6 +1666,10 @@ export type SessionRowActions = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches a session into an independent one. Rows hide it for providers that cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Sessions with a live Claude CLI process in a terminal, busy or idle; only these offer "Suspend session". */
+  liveCliSessionIds?: ReadonlySet<string>;
+  /** Closes the tmux pane the session's Claude CLI runs in; the next message resumes it in a new terminal. */
+  onSuspendSession?: (sessionId: string) => void;
 };
 
 export type SidebarProjectListProps = SessionRowActions & {

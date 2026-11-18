@@ -1307,6 +1307,28 @@ export function useSidebarController({
     [onSessionSelect, t],
   );
 
+  /**
+   * Suspends a terminal Claude session: the server closes the tmux pane its
+   * CLI runs in. Nothing is refetched — the Running tab drops the row on the
+   * next running-sessions poll, and the next message resumes the session.
+   */
+  const suspendSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        const response = await api.suspendSession(sessionId);
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload?.error?.message || `HTTP ${response.status}`);
+        }
+      } catch (error) {
+        console.error('[Sidebar] Error suspending session:', error);
+        const reason = error instanceof Error ? error.message : String(error);
+        alert(t('messages.suspendSessionError', { reason }));
+      }
+    },
+    [t],
+  );
+
   const collapseSidebar = useCallback(() => {
     setSidebarVisible(false);
   }, [setSidebarVisible]);
@@ -1352,6 +1374,7 @@ export function useSidebarController({
     toggleProject,
     handleSessionClick,
     forkSession,
+    suspendSession,
     toggleStarProject,
     isProjectStarred,
     getProjectSessions,

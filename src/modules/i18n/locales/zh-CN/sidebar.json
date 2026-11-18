@@ -28,6 +28,8 @@
     "newSession": "新建会话",
     "deleteSession": "删除会话",
     "renameSession": "重命名会话",
+    "suspendSession": "挂起会话",
+    "suspendSessionDescription": "关闭它所在的 tmux 终端，下次发消息时自动恢复。",
     "noSessions": "暂无会话",
     "loadingSessions": "加载会话中...",
     "unnamed": "未命名",
@@ -123,6 +125,7 @@
     "restoreSessionFailed": "恢复会话失败，请重试。",
     "restoreSessionError": "恢复会话时出错，请重试。",
     "forkSessionError": "无法派生该会话，请重试。",
+    "suspendSessionError": "无法挂起该会话：{{reason}}",
     "deleteSessionsPartialFailure_one": "{{total}} 个会话中有 {{count}} 个删除失败，请重试。",
     "deleteSessionsPartialFailure_other": "{{total}} 个会话中有 {{count}} 个删除失败，请重试。"
   },

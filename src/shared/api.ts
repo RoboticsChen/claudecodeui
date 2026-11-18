@@ -290,6 +290,10 @@ export const api = {
   // visible; `cleared` is false when there was no context to clear.
   clearSessionContext: (sessionId: string) =>
     post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/clear-context`),
+  // Closes the tmux pane a terminal Claude session runs in (the sidebar's
+  // "Suspend session"); the next message from the web chat resumes it.
+  suspendSession: (sessionId: string) =>
+    post(`/api/external-sessions/${encodeURIComponent(sessionId)}/suspend`),
   renameSession: (sessionId: string, summary: string) =>
     put(`/api/providers/sessions/${sessionId}`, { summary }),
   // What one agent of a workflow run did, read from its transcript on demand

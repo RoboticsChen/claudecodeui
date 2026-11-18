@@ -36,6 +36,9 @@ type SidebarProjectSessionsProps = {
   onArchiveSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
+  /** Sessions with a live terminal CLI; their rows offer "Suspend session". */
+  liveCliSessionIds?: ReadonlySet<string>;
+  onSuspendSession?: (sessionId: string) => void;
   onLoadMoreSessions: (projectId: string) => void;
   onNewSession: (project: Project) => void;
   /** The sessions ticked here, or null when this project's list is not in selection mode. */
@@ -89,6 +92,8 @@ export default function SidebarProjectSessions({
   onArchiveSession,
   onDeleteSession,
   onForkSession,
+  liveCliSessionIds,
+  onSuspendSession,
   onLoadMoreSessions,
   onNewSession,
   selectedSessionIds,
@@ -356,6 +361,8 @@ export default function SidebarProjectSessions({
                     onArchiveSession={onArchiveSession}
                     onDeleteSession={onDeleteSession}
                     onForkSession={onForkSession}
+                    hasLiveTerminal={liveCliSessionIds?.has(session.id) ?? false}
+                    onSuspendSession={onSuspendSession}
                     isSelecting={isSelecting}
                     isChecked={checkedSessionIds.has(session.id)}
                     onToggleSessionSelected={onToggleSessionSelected}

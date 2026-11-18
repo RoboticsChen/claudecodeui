@@ -28,6 +28,8 @@
     "newSession": "新增工作階段",
     "deleteSession": "刪除工作階段",
     "renameSession": "重新命名工作階段",
+    "suspendSession": "暫停工作階段",
+    "suspendSessionDescription": "關閉它所在的 tmux 終端，下次傳送訊息時自動恢復。",
     "noSessions": "暫無工作階段",
     "loadingSessions": "載入工作階段中...",
     "unnamed": "未命名",
@@ -120,6 +122,7 @@
     "restoreSessionFailed": "還原工作階段失敗，請重試。",
     "restoreSessionError": "還原工作階段時出錯，請重試。",
     "forkSessionError": "無法分支此工作階段，請再試一次。",
+    "suspendSessionError": "無法暫停此工作階段：{{reason}}",
     "deleteSessionsPartialFailure_one": "{{total}} 個工作階段中有 {{count}} 個刪除失敗，請重試。",
     "deleteSessionsPartialFailure_other": "{{total}} 個工作階段中有 {{count}} 個刪除失敗，請重試。"
   },

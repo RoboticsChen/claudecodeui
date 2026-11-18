@@ -41,6 +41,8 @@ type SidebarProjectItemProps = {
   onArchiveSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   onForkSession?: (session: SessionWithProvider) => void;
+  liveCliSessionIds?: ReadonlySet<string>;
+  onSuspendSession?: (sessionId: string) => void;
   onLoadMoreSessions: (projectId: string) => void;
   activeSessions: ReadonlySet<string>;
   backgroundSessionIds: ReadonlySet<string>;
@@ -93,6 +95,8 @@ function SidebarProjectItem({
   onArchiveSession,
   onDeleteSession,
   onForkSession,
+  liveCliSessionIds,
+  onSuspendSession,
   onLoadMoreSessions,
   activeSessions,
   backgroundSessionIds,
@@ -464,6 +468,8 @@ function SidebarProjectItem({
         onArchiveSession={onArchiveSession}
         onDeleteSession={onDeleteSession}
         onForkSession={onForkSession}
+        liveCliSessionIds={liveCliSessionIds}
+        onSuspendSession={onSuspendSession}
         onLoadMoreSessions={onLoadMoreSessions}
         onNewSession={onNewSession}
         selectedSessionIds={selectedSessionIds}

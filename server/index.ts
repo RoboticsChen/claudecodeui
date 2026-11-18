@@ -23,7 +23,7 @@ import {
     connectedClients,
     createWebSocketServer,
 } from '@/modules/websocket/index.js';
-import { startExternalSessionMonitor, stopExternalSessionMonitor } from '@/modules/external-sessions/index.js';
+import { externalSessionsRoutes, startExternalSessionMonitor, stopExternalSessionMonitor } from '@/modules/external-sessions/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -205,6 +205,8 @@ app.use('/api/browser-use', authenticateToken, browserUseRoutes);
 // Unified provider MCP routes (protected)
 app.use('/api/providers', authenticateToken, providerRoutes);
 app.use('/api/scheduled-messages', authenticateToken, scheduledMessagesRoutes);
+// Terminal (tmux) Claude session controls (protected)
+app.use('/api/external-sessions', authenticateToken, externalSessionsRoutes);
 
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);

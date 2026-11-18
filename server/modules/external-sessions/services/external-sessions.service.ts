@@ -13,6 +13,7 @@ import {
   createDetachedTmuxSession,
   hasTmuxSession,
   isTmuxInstalled,
+  killTmuxPane,
   listTmuxPanes,
   quoteShellArgument,
   resolveTmuxPaneForPid,
@@ -87,6 +88,8 @@ const INDEX_RETRY_MS = 5_000;
 /** How long a Claude CLI started for the web chat may take to show its input box. */
 const SPAWN_READY_TIMEOUT_MS = 45_000;
 const SPAWN_POLL_MS = 300;
+/** How long a suspend waits for the Claude CLI to exit after its pane is closed. */
+const SUSPEND_EXIT_TIMEOUT_MS = 5_000;
 /**
  * Flags every Claude CLI this module starts gets. The web chat cannot answer
  * a permission prompt in the terminal, so the default skips them; set
@@ -868,4 +871,69 @@ export async function interruptExternalSession(appSessionId: string): Promise<bo
     // The turn is already stopped; a leftover draft is only cosmetic.
   }
   return true;
+}
+
+/**
+ * Waits until no live Claude CLI process has this pid, so a caller that reads
+ * the registry next (the running-sessions poll) no longer lists it. Returns
+ * false when it is still alive at the deadline.
+ */
+async function waitForCliExit(pid: number): Promise<boolean> {
+  const deadline = Date.now() + SUSPEND_EXIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const processes = await listLiveClaudeCliProcesses();
+    if (!processes.some((entry) => entry.pid === pid)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, SPAWN_POLL_MS));
+  }
+  return false;
+}
+
+/**
+ * Suspends a terminal Claude session: closes the tmux pane its CLI runs in,
+ * which ends the CLI and, when that was the pane's last tmux session pane,
+ * the tmux session too. The conversation stays on disk; the next message
+ * from the web chat resumes it in a new tmux terminal.
+ *
+ * A turn running in the terminal is cut off. Refused for a session whose
+ * terminal is still being started, and for one open in a CLI outside tmux,
+ * which this module cannot close.
+ *
+ * Used by the external-sessions routes for the sidebar's "Suspend session"
+ * action. Returns an error message, or null once the CLI has exited.
+ */
+export async function suspendExternalSession(appSessionId: string): Promise<string | null> {
+  if (!dependencies) {
+    return 'Terminal sessions are not available on this server.';
+  }
+  if (pendingStarts.has(appSessionId)) {
+    return 'The terminal for this session is still starting; try again in a moment.';
+  }
+
+  const attachment = await findAttachment(appSessionId);
+  if (!attachment) {
+    const session = sessionsDb.getSessionById(appSessionId);
+    const unattachable = session?.provider_session_id ? findUnattachableProcess(session.provider_session_id) : null;
+    return unattachable
+      ? `This conversation runs in a Claude CLI outside tmux (pid ${unattachable.pid}); close it there.`
+      : 'This session is not running in a terminal.';
+  }
+
+  const { paneId, pid } = attachment;
+  try {
+    await killTmuxPane(paneId);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  console.log('[ExternalSessions] suspended terminal session', { appSessionId, pane: paneId, pid });
+
+  // Ended as aborted so a turn that was running reads as stopped, not done.
+  completeExternalRun(appSessionId, { exitCode: 0, aborted: true });
+  detach(attachment);
+  paneByPid.delete(pid);
+
+  const exited = await waitForCliExit(pid);
+  await scan();
+  return exited ? null : `The terminal was closed, but Claude (pid ${pid}) has not exited yet.`;
 }

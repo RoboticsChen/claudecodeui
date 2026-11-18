@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Archive, Check, Edit2, GitBranch, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Archive, Check, Edit2, GitBranch, MoreHorizontal, PauseCircle, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu } from '@/shared/ui';
@@ -30,6 +30,11 @@ type SessionOptionsProps = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Bound by the caller, which owns the session object the fork needs. */
   onFork?: () => void;
+  /**
+   * Closes the tmux terminal the session's Claude CLI runs in. Bound by the
+   * caller only while the session has a live terminal CLI.
+   */
+  onSuspend?: () => void;
   /** Withheld where the row has nowhere to send an archive or delete. */
   canDelete?: boolean;
   className?: string;
@@ -61,6 +66,7 @@ export default function SessionOptions({
   onArchiveSession,
   onDeleteSession,
   onFork,
+  onSuspend,
   canDelete = true,
   className,
   t,
@@ -184,6 +190,16 @@ export default function SessionOptions({
               description: 'Continue from a copy, leaving this one untouched.',
               icon: GitBranch,
               onSelect: onFork,
+            }] : []),
+            ...(onSuspend ? [{
+              key: 'suspend',
+              label: t('sessions.suspendSession', 'Suspend session'),
+              description: t(
+                'sessions.suspendSessionDescription',
+                'Close its tmux terminal. The next message resumes it.',
+              ),
+              icon: PauseCircle,
+              onSelect: onSuspend,
             }] : []),
             ...(canDelete && !isProcessing ? [{
               key: 'archive',
