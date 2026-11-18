@@ -22,6 +22,12 @@ type ParsedSession = {
    * on the row, and whether it also becomes the session's name.
    */
   providerTitleUpdate?: { title: string; rename: boolean };
+  /**
+   * The newest Claude-generated title (`ai-title`) to give a session whose
+   * name nobody chose, with the name it replaces: the update only applies if
+   * the row still holds that name when it is written.
+   */
+  automaticNameUpdate?: { from: string; to: string };
 };
 
 type IndexedSession = NonNullable<ReturnType<typeof sessionsDb.getSessionById>>;
@@ -36,6 +42,28 @@ const UNTITLED_SESSION_NAME = 'Untitled Claude Session';
  * 32 KiB it writes, and on exit. 1 MiB leaves room for large single rows.
  */
 const TRANSCRIPT_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * Whether a session's stored name was produced automatically, remembered per
+ * session for the name it held when checked. Telling an automatic name from a
+ * chosen one needs the whole transcript, and every write to a running
+ * session's transcript triggers a sync; the verdict for one name cannot change
+ * as the transcript grows, so it is computed once per name.
+ */
+const automaticNameVerdicts = new Map<string, { name: string; automatic: boolean }>();
+/** Bounds `automaticNameVerdicts`; the oldest entries are dropped first. */
+const MAX_AUTOMATIC_NAME_VERDICTS = 2_000;
+
+function rememberAutomaticNameVerdict(sessionId: string, name: string, automatic: boolean): void {
+  automaticNameVerdicts.delete(sessionId);
+  automaticNameVerdicts.set(sessionId, { name, automatic });
+  if (automaticNameVerdicts.size > MAX_AUTOMATIC_NAME_VERDICTS) {
+    const oldest = automaticNameVerdicts.keys().next().value;
+    if (oldest !== undefined) {
+      automaticNameVerdicts.delete(oldest);
+    }
+  }
+}
 
 /**
  * Session indexer for Claude transcript artifacts.
@@ -131,6 +159,14 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       });
     }
 
+    if (parsed.automaticNameUpdate && !parsed.providerTitleUpdate?.rename) {
+      const { from, to } = parsed.automaticNameUpdate;
+      if (sessionsDb.replaceSessionCustomNameIfUnchanged(sessionId, from, to)) {
+        // The new name is Claude's own title, so it is automatic by definition.
+        rememberAutomaticNameVerdict(sessionId, to, true);
+      }
+    }
+
     return sessionId;
   }
 
@@ -183,7 +219,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       // being read is not overwritten by the name read before it.
       return {
         ...parsed,
-        providerTitleUpdate: await this.resolveProviderTitleUpdate(
+        ...await this.resolveTitleUpdates(
           filePath,
           parsed.sessionId,
           existingSession,
@@ -213,34 +249,50 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   /**
-   * Decides whether a named session's transcript holds a new `/rename`.
+   * Decides what a named session's transcript changes about its name.
    *
-   * The CLI re-states the title it holds on exit, periodically and after
-   * compaction, so only a title that differs from the one recorded on the row
-   * is a new rename. A new rename is the user's latest choice and replaces the
-   * name, even one set in CloudCLI; a re-stated one changes nothing, so a
-   * later CloudCLI rename stands.
+   * A new `/rename`: the CLI re-states the title it holds on exit,
+   * periodically and after compaction, so only a title that differs from the
+   * one recorded on the row is a new rename. A new rename is the user's latest
+   * choice and replaces the name, even one set in CloudCLI; a re-stated one
+   * changes nothing, so a later CloudCLI rename stands.
+   *
+   * Otherwise, a session that was never renamed in the CLI and whose name
+   * nobody chose (the fallback, the first message, an older generated title)
+   * follows Claude's newest generated title (`ai-title`), the same title the
+   * CLI shows in its terminal. A name set in CloudCLI is never replaced.
    */
-  private async resolveProviderTitleUpdate(
+  private async resolveTitleUpdates(
     filePath: string,
     sessionId: string,
     session: IndexedSession,
     historyDisplay: string | undefined
-  ): Promise<ParsedSession['providerTitleUpdate']> {
+  ): Promise<Pick<ParsedSession, 'providerTitleUpdate' | 'automaticNameUpdate'>> {
     if (session.provider_title !== null) {
       const tail = await readTranscriptTail(filePath, TRANSCRIPT_TAIL_BYTES);
-      const title = normalizeSessionName(
-        tail ? findLastSessionRowValue(tail, sessionId, 'custom-title', 'customTitle') : undefined,
-        ''
-      );
-      return title && title !== session.provider_title ? { title, rename: true } : undefined;
+      if (!tail) {
+        return {};
+      }
+      const title = normalizeSessionName(findLastSessionRowValue(tail, sessionId, 'custom-title', 'customTitle'), '');
+      if (title && title !== session.provider_title) {
+        return { providerTitleUpdate: { title, rename: true } };
+      }
+      if (session.provider_title !== '' || title) {
+        // Renamed in the CLI: that name is the user's, not Claude's.
+        return {};
+      }
+      return {
+        automaticNameUpdate: await this.resolveAutomaticNameUpdate(
+          filePath, tail, null, sessionId, session, historyDisplay
+        ),
+      };
     }
 
     // Not read since titles are recorded (a row from before that, or one the
     // app created): the latest title can sit anywhere in the transcript.
     const content = await readTranscript(filePath);
     if (!content) {
-      return undefined;
+      return {};
     }
 
     const title = normalizeSessionName(
@@ -248,21 +300,62 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       ''
     );
     if (!title) {
-      return { title: '', rename: false };
+      return {
+        providerTitleUpdate: { title: '', rename: false },
+        automaticNameUpdate: await this.resolveAutomaticNameUpdate(
+          filePath, content, content, sessionId, session, historyDisplay
+        ),
+      };
     }
 
     // A fork's transcript opens with the title CloudCLI gave the branch (the
     // SDK writes it as a `custom-title`), so it is not a rename.
     if (session.forked_from_session_id) {
-      return { title, rename: false };
+      return { providerTitleUpdate: { title, rename: false } };
     }
 
     // The title may predate a CloudCLI rename, so it only replaces a name
     // nobody chose.
     return {
-      title,
-      rename: isAutomaticSessionName(session.custom_name, content, sessionId, historyDisplay),
+      providerTitleUpdate: {
+        title,
+        rename: isAutomaticSessionName(session.custom_name, content, sessionId, historyDisplay),
+      },
     };
+  }
+
+  /**
+   * The newest `ai-title` in `recent` (the transcript's tail, or all of it),
+   * when it differs from the session's name and that name is automatic.
+   * `content` is the whole transcript when the caller already read it; it is
+   * read here only when the verdict for the current name is not known yet.
+   */
+  private async resolveAutomaticNameUpdate(
+    filePath: string,
+    recent: Buffer,
+    content: Buffer | null,
+    sessionId: string,
+    session: IndexedSession,
+    historyDisplay: string | undefined
+  ): Promise<ParsedSession['automaticNameUpdate']> {
+    const currentName = session.custom_name ?? '';
+    const aiTitle = normalizeSessionName(findLastSessionRowValue(recent, sessionId, 'ai-title', 'aiTitle'), '');
+    if (!aiTitle || aiTitle === normalizeSessionName(currentName, UNTITLED_SESSION_NAME)) {
+      return undefined;
+    }
+
+    const cached = automaticNameVerdicts.get(session.session_id);
+    let automatic = cached?.name === currentName ? cached.automatic : undefined;
+    if (automatic === undefined) {
+      const transcript = content ?? await readTranscript(filePath);
+      if (!transcript) {
+        return undefined;
+      }
+      automatic = isAutomaticSessionName(currentName, transcript, sessionId, historyDisplay);
+      rememberAutomaticNameVerdict(session.session_id, currentName, automatic);
+    }
+
+    return automatic ? { from: currentName, to: aiTitle } : undefined;
   }
 }
 

@@ -2480,6 +2480,94 @@ test('a CloudCLI rename made while the transcript is being indexed is kept', { c
 // Edge cases
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// A name nobody chose follows Claude's newest generated title (`ai-title`)
+// ---------------------------------------------------------------------------
+
+const aiTitleRow = (title: string) => ({ type: 'ai-title', aiTitle: title, sessionId: 'test-session-1' });
+
+test('an automatic name follows the newest ai-title', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    const sessionId = await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'AI generated title');
+
+    await appendTranscriptRows(transcriptPath, [aiTitleRow('A better title')]);
+    await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'A better title');
+
+    await appendTranscriptRows(transcriptPath, [aiTitleRow('The title after that')]);
+    await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'The title after that');
+  });
+});
+
+test('a CloudCLI session named after its first message follows the ai-title', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    // CloudCLI names a session it starts after the first message it sends.
+    sessionsDb.createAppSession('app-session-1', 'claude', '/workspace/demo', 'first prompt');
+    sessionsDb.assignProviderSessionId('app-session-1', 'test-session-1');
+
+    assert.equal(await synchronizer.synchronizeFile(transcriptPath), 'app-session-1');
+    assert.equal(sessionsDb.getSessionById('app-session-1')?.custom_name, 'AI generated title');
+  });
+});
+
+test('a name set in CloudCLI is never replaced by an ai-title', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    const sessionId = await synchronizer.synchronizeFile(transcriptPath);
+    sessionsDb.updateSessionCustomName(sessionId!, 'Renamed in CloudCLI');
+
+    await appendTranscriptRows(transcriptPath, [aiTitleRow('A newer generated title')]);
+    await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in CloudCLI');
+  });
+});
+
+test('a session renamed in the CLI keeps that name when the ai-title changes', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    await appendTranscriptRows(transcriptPath, cliRenameRows('Renamed in the TUI'));
+    const sessionId = await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in the TUI');
+
+    await appendTranscriptRows(transcriptPath, [aiTitleRow('A newer generated title')]);
+    await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in the TUI');
+  });
+});
+
+test('a row indexed before titles were recorded follows the ai-title once it is read again', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    // An older CloudCLI recorded the first message and no provider title.
+    sessionsDb.createSession('test-session-1', 'claude', '/workspace/demo', 'first prompt');
+    assert.equal(sessionsDb.getSessionById('test-session-1')?.provider_title, null);
+
+    await synchronizer.synchronizeFile(transcriptPath);
+    assert.equal(sessionsDb.getSessionById('test-session-1')?.custom_name, 'AI generated title');
+  });
+});
+
+test('a CloudCLI rename made between reading and writing is not overwritten by the ai-title', { concurrency: false }, async () => {
+  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
+    const sessionId = await synchronizer.synchronizeFile(transcriptPath);
+    await appendTranscriptRows(transcriptPath, [aiTitleRow('A better title')]);
+
+    // The sidebar rename lands after the synchronizer decided to follow the
+    // ai-title, right before it writes the row back.
+    const createSession = sessionsDb.createSession;
+    sessionsDb.createSession = (...args: Parameters<typeof createSession>) => {
+      sessionsDb.updateSessionCustomName(sessionId!, 'Renamed in CloudCLI');
+      return createSession.apply(sessionsDb, args);
+    };
+    try {
+      await synchronizer.synchronizeFile(transcriptPath);
+    } finally {
+      sessionsDb.createSession = createSession;
+    }
+
+    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in CloudCLI');
+  });
+});
+
 test('synchronizeFile skips subagent transcripts', { concurrency: false }, async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-subagent-'));
   const workspacePath = path.join(tmp, 'workspace');

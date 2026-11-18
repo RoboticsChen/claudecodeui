@@ -527,6 +527,25 @@ export const sessionsDb = {
   },
 
   /**
+   * Replaces a session's name only while it still is `expectedName`, and
+   * reports whether it did.
+   *
+   * Used by the Claude session synchronizer to let a name nobody chose follow
+   * the provider's newest generated title. The check runs in the same
+   * statement as the write, so a rename the user makes in CloudCLI while the
+   * transcript is being read is never overwritten.
+   */
+  replaceSessionCustomNameIfUnchanged(sessionId: string, expectedName: string, customName: string): boolean {
+    const db = getConnection();
+    const result = db.prepare(
+      `UPDATE sessions
+       SET custom_name = ?
+       WHERE session_id = ? AND COALESCE(custom_name, '') = ?`
+    ).run(customName, sessionId, expectedName);
+    return result.changes > 0;
+  },
+
+  /**
    * Records the title the provider CLI holds for one session (Claude's
    * `/rename`; '' records that it holds none), and makes it the session's
    * name too when `rename` is set.
