@@ -361,8 +361,7 @@ export default function SidebarProjectSessions({
                     onArchiveSession={onArchiveSession}
                     onDeleteSession={onDeleteSession}
                     onForkSession={onForkSession}
-                    hasLiveTerminal={liveCliSessionIds?.has(session.id) ?? false}
-                    onSuspendSession={onSuspendSession}
+                    onSuspendSession={liveCliSessionIds?.has(session.id) ? onSuspendSession : undefined}
                     isSelecting={isSelecting}
                     isChecked={checkedSessionIds.has(session.id)}
                     onToggleSessionSelected={onToggleSessionSelected}

@@ -1845,17 +1845,14 @@ export type SandboxCommandService = {
  *   caching the mapping.
  * - `status` is the CLI's own turn state: `busy` while a turn runs, `idle`
  *   while it waits for input. Any other value is reported as `idle`.
- * - `entrypoint` is who started the process: `cli` for a terminal,
- *   `claudecodeui` for one CloudCLI's own SDK runtime started. The latter are
- *   CloudCLI's chat runs, which the chat-run registry already tracks; their
- *   registry status is not reliable (an SDK process idling between turns can
- *   keep reading `busy`), so callers must not treat them as terminals.
+ *
+ * Processes CloudCLI's own SDK runtime started are never reported: the
+ * chat-run registry tracks them, and an SDK process idling between turns can
+ * keep reading `busy`.
  */
 export type LiveClaudeCliProcess = {
   pid: number;
   providerSessionId: string;
-  cwd: string | null;
   status: 'busy' | 'idle';
   startedAt: number;
-  entrypoint: string | null;
 };

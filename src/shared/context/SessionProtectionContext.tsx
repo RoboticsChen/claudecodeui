@@ -229,11 +229,9 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
     <SessionProtectionActionsContext.Provider value={actions}>
       <BusySessionIdsContext.Provider value={busySessionIds}>
         <BackgroundSessionIdsContext.Provider value={backgroundSessionIds}>
-          <LiveCliSessionIdsContext.Provider value={liveCliSessionIds}>
-            <SessionProtectionStateContext.Provider value={processingSessions}>
-              {children}
-            </SessionProtectionStateContext.Provider>
-          </LiveCliSessionIdsContext.Provider>
+          <SessionProtectionStateContext.Provider value={processingSessions}>
+            <LiveCliSessionIdsContext.Provider value={liveCliSessionIds}>{children}</LiveCliSessionIdsContext.Provider>
+          </SessionProtectionStateContext.Provider>
         </BackgroundSessionIdsContext.Provider>
       </BusySessionIdsContext.Provider>
     </SessionProtectionActionsContext.Provider>

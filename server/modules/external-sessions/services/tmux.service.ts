@@ -206,20 +206,16 @@ export async function hasTmuxSession(name: string): Promise<boolean> {
  * Used by the external-sessions service to open a terminal for a session the
  * web chat sends to while no terminal runs it. `command` is parsed by `sh -c`
  * in the pane; callers start it with `exec` so the pane's process is the
- * program itself. `env` is set on the session (tmux `-e`), on top of the tmux
- * server's own environment.
+ * program itself.
  */
 export async function createDetachedTmuxSession(input: {
   name: string;
   cwd: string;
   command: string;
-  env?: Record<string, string>;
 }): Promise<{ paneId: string; panePid: number }> {
-  const envArgs = Object.entries(input.env ?? {}).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
   const [file, ...args] = await tmuxServerSafeArgv([
     'new-session', '-d', '-P', '-F', '#{pane_id} #{pane_pid}',
     '-s', input.name, '-c', input.cwd, '-x', '200', '-y', '50',
-    ...envArgs,
     input.command,
   ]);
   const stdout = await runCommand(file, args);
@@ -243,10 +239,8 @@ export async function buildAttachedTmuxSessionCommand(input: {
   name: string;
   cwd: string;
   command: string;
-  env?: Record<string, string>;
 }): Promise<string> {
-  const envArgs = Object.entries(input.env ?? {}).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
-  const argv = await tmuxServerSafeArgv(['new-session', '-s', input.name, '-c', input.cwd, ...envArgs, input.command]);
+  const argv = await tmuxServerSafeArgv(['new-session', '-s', input.name, '-c', input.cwd, input.command]);
   return `exec ${argv.map(quoteShellArgument).join(' ')}`;
 }
 

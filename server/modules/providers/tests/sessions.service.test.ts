@@ -417,11 +417,6 @@ test('the running snapshot lists every live CLI session, idle ones included, wit
               { sessionId: 'idle-cli', provider: 'claude', status: 'idle', startedAt: 6_000 },
             ],
           );
-          assert.deepEqual(
-            await sessionsService.listRunningSessions(),
-            snapshot.sessions,
-            'the busy list is unchanged for its other callers',
-          );
         },
       ),
     );

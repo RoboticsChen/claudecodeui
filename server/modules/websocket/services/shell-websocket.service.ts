@@ -5,7 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { buildShellCommandForSession, isExternalSessionMonitorRunning } from '@/modules/external-sessions/index.js';
+import { buildShellCommandForSession } from '@/modules/external-sessions/index.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -642,7 +642,7 @@ export function handleShellConnection(
         // A Claude session opens in its tmux terminal — the one the web chat
         // types into — instead of a second CLI resumed here, which would fork
         // the conversation. The CLI then paints in its own theme.
-        const terminalCommand = isExternalSessionMonitorRunning() && provider === 'claude' && hasSession && sessionId && !isPlainShell
+        const terminalCommand = provider === 'claude' && hasSession && sessionId && !isPlainShell
           ? await buildShellCommandForSession(sessionId, {
             extraFlags: readBoolean(data.bypassPermissions) ? '--dangerously-skip-permissions' : '',
           })

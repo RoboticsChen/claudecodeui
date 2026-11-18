@@ -5,6 +5,13 @@ import path from 'node:path';
 import type { LiveClaudeCliProcess } from '@/shared/types.js';
 
 /**
+ * The registry's `entrypoint` for processes CloudCLI's SDK runtime started.
+ * Those are CloudCLI's own chat runs, tracked by the chat-run registry, and
+ * their registry status is not reliable, so they are never reported here.
+ */
+const SDK_ENTRYPOINT = 'claudecodeui';
+
+/**
  * Claude Code keeps one file per running session here, named `<pid>.json`.
  * The directory belongs to the CLI, not to CloudCLI: it is only ever read.
  */
@@ -72,7 +79,7 @@ async function readLiveProcess(filePath: string): Promise<LiveClaudeCliProcess |
 
   const providerSessionId = typeof record.sessionId === 'string' ? record.sessionId : '';
   const pid = typeof record.pid === 'number' ? record.pid : NaN;
-  if (!providerSessionId || !Number.isInteger(pid) || pid <= 0) {
+  if (!providerSessionId || !Number.isInteger(pid) || pid <= 0 || record.entrypoint === SDK_ENTRYPOINT) {
     return null;
   }
 
@@ -83,10 +90,8 @@ async function readLiveProcess(filePath: string): Promise<LiveClaudeCliProcess |
   return {
     pid,
     providerSessionId,
-    cwd: typeof record.cwd === 'string' && record.cwd ? record.cwd : null,
     status: record.status === 'busy' ? 'busy' : 'idle',
     startedAt: typeof record.startedAt === 'number' ? record.startedAt : Date.now(),
-    entrypoint: typeof record.entrypoint === 'string' && record.entrypoint ? record.entrypoint : null,
   };
 }
 
@@ -102,21 +107,6 @@ async function readLiveProcess(filePath: string): Promise<LiveClaudeCliProcess |
  * cached or persisted.
  */
 export async function listLiveClaudeCliProcesses(): Promise<LiveClaudeCliProcess[]> {
-  return (await listAllLiveClaudeProcesses()).filter((entry) => entry.entrypoint !== SDK_ENTRYPOINT);
-}
-
-/**
- * The registry's `entrypoint` for processes CloudCLI's SDK runtime started
- * (the SDK is told to identify itself so; see the claude runtime provider).
- */
-const SDK_ENTRYPOINT = 'claudecodeui';
-
-/**
- * Every live process in the registry, SDK-started ones included. Only the
- * terminal processes are exported: CloudCLI's own runs are tracked by the
- * chat-run registry, and their registry status is not reliable.
- */
-async function listAllLiveClaudeProcesses(): Promise<LiveClaudeCliProcess[]> {
   let entries: string[];
   try {
     entries = await fsp.readdir(registryDirectory());

@@ -34,9 +34,7 @@ type SidebarSessionItemProps = {
   onDeleteSession: (sessionId: string, sessionTitle: string) => void;
   /** Branches this session into an independent one; absent when its provider cannot. */
   onForkSession?: (session: SessionWithProvider) => void;
-  /** A Claude CLI for this session is alive in a terminal, so it can be suspended. */
-  hasLiveTerminal?: boolean;
-  /** Closes the session's tmux terminal; offered only while `hasLiveTerminal`. */
+  /** Closes the session's tmux terminal; bound only while a Claude CLI for it is alive there. */
   onSuspendSession?: (sessionId: string) => void;
   /** This project's list is in bulk-selection mode: the row acts as a checkbox and hides its options. */
   isSelecting: boolean;
@@ -69,7 +67,6 @@ function SidebarSessionItem({
   onArchiveSession,
   onDeleteSession,
   onForkSession,
-  hasLiveTerminal = false,
   onSuspendSession,
   isSelecting,
   isChecked,
@@ -104,7 +101,7 @@ function SidebarSessionItem({
   // the desktop SessionOptions menu. The capability request is shared by rows.
   const forkableProviders = useSessionForkingProviders();
   const canFork = Boolean(onForkSession) && forkableProviders.has(session.__provider) && !isProcessing;
-  const suspendSession = hasLiveTerminal && onSuspendSession ? () => onSuspendSession(session.id) : undefined;
+  const suspendSession = onSuspendSession ? () => onSuspendSession(session.id) : undefined;
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
   // after the projectName → projectId migration.

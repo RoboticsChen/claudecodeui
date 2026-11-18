@@ -128,39 +128,29 @@ let registryDebounce: ReturnType<typeof setTimeout> | null = null;
 let scanInFlight: Promise<void> | null = null;
 let scanAgain = false;
 
-function sendStatus(run: ChatRun, providerSessionId: string): void {
-  run.writer.send(createNormalizedMessage({
-    kind: 'status',
-    text: 'Working in terminal',
-    canInterrupt: true,
-    sessionId: providerSessionId,
-    provider: 'claude',
-  }));
-}
-
 /**
- * Starts the run the web chat shows while the terminal works on a turn.
+ * Starts the run the web chat shows while the terminal works on a turn, or
+ * while a terminal for the session is still starting.
  *
  * Every connected socket is added to the run's audience: a turn typed in the
  * terminal starts without any client having asked for it, so nobody would be
  * subscribed yet. Clients filter frames by session id themselves.
  */
-function startExternalRun(attachment: Attachment): void {
-  if (!dependencies) {
-    return;
-  }
-
-  const current = dependencies.runRegistry.getRun(attachment.appSessionId);
-  if (current?.status === 'running') {
-    // Either ours already, or a run CloudCLI itself drives through the SDK,
-    // which this module must never end.
+function startExternalRun(
+  appSessionId: string,
+  providerSessionId: string | null,
+  status: { text: string; canInterrupt: boolean } = { text: 'Working in terminal', canInterrupt: true },
+): void {
+  // Already running: either ours, or a run CloudCLI itself drives through the
+  // SDK, which this module must never end.
+  if (!dependencies || dependencies.runRegistry.getRun(appSessionId)?.status === 'running') {
     return;
   }
 
   const run = dependencies.runRegistry.startRun({
-    appSessionId: attachment.appSessionId,
+    appSessionId,
     provider: 'claude',
-    providerSessionId: attachment.providerSessionId,
+    providerSessionId,
     connection: null,
     userId: null,
   });
@@ -171,8 +161,13 @@ function startExternalRun(attachment: Attachment): void {
   for (const connection of dependencies.connections) {
     run.writer.updateWebSocket(connection);
   }
-  externalRuns.set(attachment.appSessionId, { run, startedAt: Date.now() });
-  sendStatus(run, attachment.providerSessionId);
+  externalRuns.set(appSessionId, { run, startedAt: Date.now() });
+  run.writer.send(createNormalizedMessage({
+    kind: 'status',
+    ...status,
+    sessionId: providerSessionId ?? appSessionId,
+    provider: 'claude',
+  }));
 }
 
 function completeExternalRun(appSessionId: string, opts: { exitCode: number; aborted?: boolean }): void {
@@ -188,7 +183,7 @@ function completeExternalRun(appSessionId: string, opts: { exitCode: number; abo
 function reconcileRun(attachment: Attachment): void {
   if (attachment.status === 'busy') {
     if (Date.now() >= attachment.ignoreBusyUntil) {
-      startExternalRun(attachment);
+      startExternalRun(attachment.appSessionId, attachment.providerSessionId);
     }
     return;
   }
@@ -334,15 +329,11 @@ async function scanOnce(): Promise<void> {
     }
 
     let session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
-    if (!session) {
-      await indexCliSession(cliProcess.providerSessionId);
-      session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
-    }
-    if (session && !session.jsonl_path) {
-      // A session the web chat started has no transcript on record until the
-      // CLI writes its first row; the history reader and the live refresh both
-      // need the path, so it is looked for now instead of at the watcher's
-      // next poll.
+    if (!session?.jsonl_path) {
+      // Not indexed yet, or a session the web chat started, which has no
+      // transcript on record until the CLI writes its first row; the history
+      // reader and the live refresh both need the path, so it is looked for
+      // now instead of at the watcher's next poll.
       await indexCliSession(cliProcess.providerSessionId);
       session = sessionsDb.getSessionByProviderSessionId(cliProcess.providerSessionId);
     }
@@ -432,11 +423,6 @@ async function findAttachment(appSessionId: string): Promise<Attachment | null> 
     await scan();
   }
   return attachments.get(appSessionId) ?? null;
-}
-
-/** The pane's text, with a missing pane read as an empty screen. */
-async function readPaneText(paneId: string): Promise<string> {
-  return (await captureTmuxPane(paneId)) ?? '';
 }
 
 /**
@@ -558,34 +544,6 @@ async function waitForTerminalReady(paneId: string, panePid: number, providerSes
   return `Claude did not become ready in the terminal within ${SPAWN_READY_TIMEOUT_MS / 1000}s. Check it with \`tmux attach -t ${tmuxName}\`.`;
 }
 
-/** Holds a run open while the terminal starts, so the composer shows it as working. */
-function startPendingRun(appSessionId: string, providerSessionId: string | null): void {
-  if (!dependencies || dependencies.runRegistry.getRun(appSessionId)?.status === 'running') {
-    return;
-  }
-  const run = dependencies.runRegistry.startRun({
-    appSessionId,
-    provider: 'claude',
-    providerSessionId,
-    connection: null,
-    userId: null,
-  });
-  if (!run) {
-    return;
-  }
-  for (const connection of dependencies.connections) {
-    run.writer.updateWebSocket(connection);
-  }
-  externalRuns.set(appSessionId, { run, startedAt: Date.now() });
-  run.writer.send(createNormalizedMessage({
-    kind: 'status',
-    text: 'Starting Claude in a terminal',
-    canInterrupt: false,
-    sessionId: providerSessionId ?? appSessionId,
-    provider: 'claude',
-  }));
-}
-
 async function startTerminalForSession(appSessionId: string, model?: string): Promise<string | null> {
   const session = sessionsDb.getSessionById(appSessionId);
   if (!session || session.provider !== 'claude') {
@@ -616,7 +574,8 @@ async function startTerminalForSession(appSessionId: string, model?: string): Pr
     return 'The Claude CLI was not found on the server\'s PATH.';
   }
 
-  startPendingRun(appSessionId, target.providerSessionId);
+  // Held open while the terminal starts, so the composer shows it as working.
+  startExternalRun(appSessionId, target.providerSessionId, { text: 'Starting Claude in a terminal', canInterrupt: false });
   const tmuxName = await pickTmuxSessionName(cwd);
   let pane: { paneId: string; panePid: number };
   try {
@@ -705,7 +664,7 @@ export function startExternalSessionMonitor(deps: ExternalSessionMonitorDependen
  * Stops the monitor and releases every watcher. Runs it leaves are ended so
  * no client stays "processing" for a terminal nobody watches anymore.
  *
- * Used by the server composition root on shutdown, and by tests.
+ * Used by the server composition root on shutdown.
  */
 export function stopExternalSessionMonitor(): void {
   if (scanTimer) {
@@ -745,9 +704,6 @@ export async function isExternalSession(appSessionId: string): Promise<boolean> 
   if (await findAttachment(appSessionId)) {
     return true;
   }
-  if (pendingStarts.has(appSessionId)) {
-    return true;
-  }
   const session = sessionsDb.getSessionById(appSessionId);
   return session?.provider === 'claude' && await isTmuxInstalled();
 }
@@ -777,7 +733,7 @@ export async function sendToExternalSession(
     return 'The terminal session is no longer running.';
   }
 
-  if (BLOCKING_PROMPT_PATTERN.test(await readPaneText(attachment.paneId))) {
+  if (BLOCKING_PROMPT_PATTERN.test((await captureTmuxPane(attachment.paneId)) ?? '')) {
     return 'The terminal is waiting for an answer to a prompt; answer it there first.';
   }
 
@@ -791,19 +747,8 @@ export async function sendToExternalSession(
   // A send is a new turn, so it ends any post-interrupt grace.
   attachment.status = 'busy';
   attachment.ignoreBusyUntil = 0;
-  startExternalRun(attachment);
+  startExternalRun(attachment.appSessionId, attachment.providerSessionId);
   return null;
-}
-
-/**
- * Whether the terminal-session monitor runs in this process.
- *
- * Used by the websocket module's Shell handler to skip the asynchronous
- * terminal lookup entirely when the monitor is off (tests, embedded use), so
- * the Shell view launches exactly as it always did.
- */
-export function isExternalSessionMonitorRunning(): boolean {
-  return dependencies !== null;
 }
 
 /**
@@ -964,7 +909,6 @@ export async function suspendExternalSession(appSessionId: string): Promise<stri
     } catch (error) {
       failures.push(`${target.paneId}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    paneByPid.delete(target.pid);
   }
   console.log('[ExternalSessions] suspended terminal session', { appSessionId, targets, failures });
 

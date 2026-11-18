@@ -200,12 +200,10 @@ export function useSidebarController({
   const isSidebarCollapsed = !isMobile && !sidebarVisible;
   // The Running tab lists every session that is busy here or has a live CLI
   // process in a terminal, even an idle one waiting for input.
-  const activeSessionIds = useMemo<ReadonlySet<string>>(() => {
-    if (!liveCliSessionIds || liveCliSessionIds.size === 0) {
-      return activeSessions;
-    }
-    return new Set([...activeSessions, ...liveCliSessionIds]);
-  }, [activeSessions, liveCliSessionIds]);
+  const activeSessionIds = useMemo<ReadonlySet<string>>(
+    () => (liveCliSessionIds?.size ? new Set([...activeSessions, ...liveCliSessionIds]) : activeSessions),
+    [activeSessions, liveCliSessionIds],
+  );
   const runningSessionsCount = activeSessionIds.size;
 
   useEffect(() => {
@@ -1312,8 +1310,8 @@ export function useSidebarController({
 
   /**
    * Suspends a terminal Claude session: the server closes the tmux pane its
-   * CLI runs in. Nothing is refetched — the Running tab drops the row on the
-   * next running-sessions poll, and the next message resumes the session.
+   * CLI runs in, and the running-sessions poll is re-read so the row leaves
+   * the Running tab at once. The next message resumes the session.
    */
   const suspendSession = useCallback(
     async (sessionId: string) => {
@@ -1325,12 +1323,11 @@ export function useSidebarController({
         }
       } catch (error) {
         console.error('[Sidebar] Error suspending session:', error);
-        void refreshRunningSessions?.();
         const reason = error instanceof Error ? error.message : String(error);
         alert(t('messages.suspendSessionError', { reason }));
-        return;
+      } finally {
+        void refreshRunningSessions?.();
       }
-      await refreshRunningSessions?.();
     },
     [refreshRunningSessions, t],
   );

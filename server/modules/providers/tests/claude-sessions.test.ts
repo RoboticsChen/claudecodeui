@@ -2230,24 +2230,6 @@ test('synchronizeFile applies a /rename to a session started in CloudCLI', { con
   });
 });
 
-test('a CloudCLI rename outlives the CLI re-stating an older /rename, and a newer /rename replaces it', { concurrency: false }, async () => {
-  await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
-    await appendTranscriptRows(transcriptPath, cliRenameRows('Renamed in the TUI'));
-    const sessionId = await synchronizer.synchronizeFile(transcriptPath);
-    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in the TUI');
-
-    // Sidebar rename, then the CLI exits and re-appends the title it holds.
-    sessionsDb.updateSessionCustomName(sessionId!, 'Renamed in CloudCLI');
-    await appendTranscriptRows(transcriptPath, cliExitRows('Renamed in the TUI'));
-    await synchronizer.synchronizeFile(transcriptPath);
-    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in CloudCLI');
-
-    await appendTranscriptRows(transcriptPath, [...cliRenameRows('Renamed in the TUI again'), ...cliExitRows('Renamed in the TUI again')]);
-    await synchronizer.synchronizeFile(transcriptPath);
-    assert.equal(sessionsDb.getSessionById(sessionId!)?.custom_name, 'Renamed in the TUI again');
-  });
-});
-
 test('a fork keeps a CloudCLI rename over the title it was branched with', { concurrency: false }, async () => {
   await withClaudeRenameFixture(async ({ transcriptPath, synchronizer }) => {
     // The SDK writes the fork's title into the new transcript as a custom-title.

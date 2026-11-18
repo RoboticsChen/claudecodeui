@@ -2,7 +2,6 @@ export {
   buildShellCommandForSession,
   interruptExternalSession,
   isExternalSession,
-  isExternalSessionMonitorRunning,
   sendToExternalSession,
   startExternalSessionMonitor,
   stopExternalSessionMonitor,
