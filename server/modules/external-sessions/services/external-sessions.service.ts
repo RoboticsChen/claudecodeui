@@ -306,12 +306,28 @@ async function resolvePane(pid: number, panes: Map<number, string>): Promise<str
   return paneId;
 }
 
+/**
+ * Orders live processes so that, when several CLIs run one provider session
+ * (a copy resumed by hand in another tmux window), the one the web chat
+ * should drive comes first: a busy one, then the most recently started.
+ * The scan attaches the first it sees per session, so without this order it
+ * would flip between them on every scan.
+ */
+function preferredProcessOrder(processes: LiveClaudeCliProcess[]): LiveClaudeCliProcess[] {
+  return [...processes].sort((left, right) => {
+    if (left.status !== right.status) {
+      return left.status === 'busy' ? -1 : 1;
+    }
+    return right.startedAt - left.startedAt;
+  });
+}
+
 async function scanOnce(): Promise<void> {
   const [processes, panes] = await Promise.all([listLiveClaudeCliProcesses(), listTmuxPanes()]);
   lastLiveProcesses = processes;
   const seen = new Set<string>();
 
-  for (const cliProcess of processes) {
+  for (const cliProcess of preferredProcessOrder(processes)) {
     const paneId = panes.size > 0 ? await resolvePane(cliProcess.pid, panes) : null;
     if (!paneId) {
       continue;
@@ -335,6 +351,10 @@ async function scanOnce(): Promise<void> {
     }
 
     const appSessionId = session.session_id;
+    if (seen.has(appSessionId)) {
+      // A second CLI on the same session; the preferred one is already attached.
+      continue;
+    }
     seen.add(appSessionId);
 
     let attachment = attachments.get(appSessionId);
@@ -874,34 +894,35 @@ export async function interruptExternalSession(appSessionId: string): Promise<bo
 }
 
 /**
- * Waits until no live Claude CLI process has this pid, so a caller that reads
- * the registry next (the running-sessions poll) no longer lists it. Returns
- * false when it is still alive at the deadline.
+ * Waits until none of these pids is a live Claude CLI process, so a caller
+ * that reads the registry next (the running-sessions poll) no longer lists
+ * them. Returns the pids still alive at the deadline.
  */
-async function waitForCliExit(pid: number): Promise<boolean> {
+async function waitForCliExit(pids: number[]): Promise<number[]> {
   const deadline = Date.now() + SUSPEND_EXIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const processes = await listLiveClaudeCliProcesses();
-    if (!processes.some((entry) => entry.pid === pid)) {
-      return true;
-    }
+  let alive = pids;
+  while (alive.length > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, SPAWN_POLL_MS));
+    const processes = await listLiveClaudeCliProcesses();
+    alive = alive.filter((pid) => processes.some((entry) => entry.pid === pid));
   }
-  return false;
+  return alive;
 }
 
 /**
- * Suspends a terminal Claude session: closes the tmux pane its CLI runs in,
- * which ends the CLI and, when that was the pane's last tmux session pane,
- * the tmux session too. The conversation stays on disk; the next message
- * from the web chat resumes it in a new tmux terminal.
+ * Suspends a terminal Claude session: closes every tmux pane a Claude CLI
+ * for it runs in, which ends those CLIs and, when one was the last pane of
+ * its tmux session, that tmux session too. Usually that is one pane, but a
+ * copy resumed by hand in another tmux window runs the same conversation and
+ * would otherwise keep it open. The conversation stays on disk; the next
+ * message from the web chat resumes it in a new tmux terminal.
  *
  * A turn running in the terminal is cut off. Refused for a session whose
- * terminal is still being started, and for one open in a CLI outside tmux,
- * which this module cannot close.
+ * terminal is still being started, and for one open only in a CLI outside
+ * tmux, which this module cannot close.
  *
  * Used by the external-sessions routes for the sidebar's "Suspend session"
- * action. Returns an error message, or null once the CLI has exited.
+ * action. Returns an error message, or null once the CLIs have exited.
  */
 export async function suspendExternalSession(appSessionId: string): Promise<string | null> {
   if (!dependencies) {
@@ -911,29 +932,59 @@ export async function suspendExternalSession(appSessionId: string): Promise<stri
     return 'The terminal for this session is still starting; try again in a moment.';
   }
 
-  const attachment = await findAttachment(appSessionId);
-  if (!attachment) {
-    const session = sessionsDb.getSessionById(appSessionId);
-    const unattachable = session?.provider_session_id ? findUnattachableProcess(session.provider_session_id) : null;
-    return unattachable
-      ? `This conversation runs in a Claude CLI outside tmux (pid ${unattachable.pid}); close it there.`
+  const session = sessionsDb.getSessionById(appSessionId);
+  const providerSessionId = session?.provider_session_id;
+  if (!session || session.provider !== 'claude' || !providerSessionId) {
+    return 'This session is not running in a terminal.';
+  }
+
+  const [processes, panes] = await Promise.all([listLiveClaudeCliProcesses(), listTmuxPanes()]);
+  const sessionProcesses = processes.filter((entry) => entry.providerSessionId === providerSessionId);
+  const targets: Array<{ pid: number; paneId: string }> = [];
+  const outsideTmux: number[] = [];
+  for (const cliProcess of sessionProcesses) {
+    const paneId = panes.size > 0 ? await resolvePane(cliProcess.pid, panes) : null;
+    if (paneId) {
+      targets.push({ pid: cliProcess.pid, paneId });
+    } else {
+      outsideTmux.push(cliProcess.pid);
+    }
+  }
+
+  if (targets.length === 0) {
+    return outsideTmux.length > 0
+      ? `This conversation runs in a Claude CLI outside tmux (pid ${outsideTmux.join(', ')}); close it there.`
       : 'This session is not running in a terminal.';
   }
 
-  const { paneId, pid } = attachment;
-  try {
-    await killTmuxPane(paneId);
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+  const failures: string[] = [];
+  for (const target of targets) {
+    try {
+      await killTmuxPane(target.paneId);
+    } catch (error) {
+      failures.push(`${target.paneId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    paneByPid.delete(target.pid);
   }
-  console.log('[ExternalSessions] suspended terminal session', { appSessionId, pane: paneId, pid });
+  console.log('[ExternalSessions] suspended terminal session', { appSessionId, targets, failures });
 
   // Ended as aborted so a turn that was running reads as stopped, not done.
   completeExternalRun(appSessionId, { exitCode: 0, aborted: true });
-  detach(attachment);
-  paneByPid.delete(pid);
+  const attachment = attachments.get(appSessionId);
+  if (attachment) {
+    detach(attachment);
+  }
 
-  const exited = await waitForCliExit(pid);
+  const stillAlive = await waitForCliExit(targets.map((target) => target.pid));
   await scan();
-  return exited ? null : `The terminal was closed, but Claude (pid ${pid}) has not exited yet.`;
+  if (failures.length > 0) {
+    return `Could not close ${failures.join('; ')}`;
+  }
+  if (stillAlive.length > 0) {
+    return `The terminal was closed, but Claude (pid ${stillAlive.join(', ')}) has not exited yet.`;
+  }
+  if (outsideTmux.length > 0) {
+    return `Closed the tmux terminal, but the conversation is still open in a Claude CLI outside tmux (pid ${outsideTmux.join(', ')}).`;
+  }
+  return null;
 }

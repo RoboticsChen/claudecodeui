@@ -66,6 +66,8 @@ type UseSidebarControllerArgs = {
    * Listed on the Running tab alongside the busy sessions; never treated as busy.
    */
   liveCliSessionIds?: ReadonlySet<string>;
+  /** Re-reads the running-sessions poll, so a suspended terminal leaves the Running tab at once. */
+  refreshRunningSessions?: () => Promise<void>;
   isLoading: boolean;
   isMobile: boolean;
   t: TFunction;
@@ -90,6 +92,7 @@ export function useSidebarController({
   activeSessions,
   backgroundSessionIds,
   liveCliSessionIds,
+  refreshRunningSessions,
   isLoading,
   isMobile,
   t,
@@ -1322,11 +1325,14 @@ export function useSidebarController({
         }
       } catch (error) {
         console.error('[Sidebar] Error suspending session:', error);
+        void refreshRunningSessions?.();
         const reason = error instanceof Error ? error.message : String(error);
         alert(t('messages.suspendSessionError', { reason }));
+        return;
       }
+      await refreshRunningSessions?.();
     },
-    [t],
+    [refreshRunningSessions, t],
   );
 
   const collapseSidebar = useCallback(() => {

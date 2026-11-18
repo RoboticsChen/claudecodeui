@@ -38,6 +38,8 @@ type SessionProtectionActions = {
   syncProcessingSessions: SyncProcessingSessions;
   isSessionProcessing: IsSessionProcessing;
   getSessionActivity: GetSessionActivity;
+  /** Re-reads the running-sessions poll now, e.g. after a terminal was suspended, instead of waiting for the next tick. */
+  refreshRunningSessions: () => Promise<void>;
 };
 
 const SessionProtectionStateContext = createContext<SessionActivityMap | null>(null);
@@ -207,9 +209,11 @@ export function SessionProtectionProvider({ children }: { children: ReactNode })
       syncProcessingSessions,
       isSessionProcessing,
       getSessionActivity,
+      refreshRunningSessions,
     }),
     [
       getSessionActivity,
+      refreshRunningSessions,
       isSessionProcessing,
       markSessionBackground,
       markSessionIdle,
